@@ -201,4 +201,23 @@ mod tests {
         assert!(manual_receiver("10.0.0.5:99999").is_err());
         assert!(manual_receiver("").is_err());
     }
+
+    /// Needs multicast on a real interface (not CI): `cargo test -p nanocast-core -- --ignored`.
+    #[test]
+    #[ignore]
+    fn browser_sees_local_advertiser() {
+        let _ad = Advertiser::new("NANOCast test TV", 48399, 1920, 1080).unwrap();
+        let browser = Browser::new().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let found = loop {
+            let list = browser.receivers();
+            if let Some(r) = list.into_iter().find(|r| r.name == "NANOCast test TV") {
+                break r;
+            }
+            assert!(Instant::now() < deadline, "advertiser not seen within 5 s");
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert_eq!((found.port, found.ctrl_port, found.width), (48399, CONTROL_PORT, Some(1920)));
+        browser.rescan().unwrap();
+    }
 }
