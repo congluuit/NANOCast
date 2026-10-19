@@ -154,3 +154,19 @@ Mã: `crates/core/src/control.rs` (+ `CONTROL_PORT = 48323` trong `protocol.rs`,
 - Hồi phục hình thật sau mất gói: emulator chỉ cho thấy request đi và IDR được ép; trong thử nghiệm video do `spike-send` (file) phát chứ không phải spike-win, nên IDR ép chưa tới decoder. Cần đo trên TV: thời gian từ lỗ `seq` → IDR hiện hình (kỳ vọng ≈ RTT + 1 khung encode + ~28 ms rải gói keyframe).
 - `audio {on}`: receiver chỉ ghi log (chưa có đường âm thanh).
 - Sender chưa dùng `stats` (adaptive bitrate là Phase 2); receiver chưa từ chối `start` vượt `max_w/max_h`.
+
+## 2026-10-19 — Phase 1 GUI (`nanocast.exe`)
+
+Cùng máy dev. Receiver giả (Python: TCP 48323 trả `caps`, gửi `stats` mỗi giây và một `keyframe_request`; UDP 48322 đếm gói) trên 127.0.0.1, nhập IP tay trong GUI.
+
+| Kiểm tra | Kết quả |
+|---|---|
+| Chọn encoder *Tự động* | NVIDIA MFT lỗi `CoCreateInstance` (0x8000FFFF) → tự chuyển sang Intel QSV |
+| Cast màn hình 1920×1080, 60 fps, 30 Mbps | GUI: 60 fps, 30,0 Mbps, encode 11,8 ms |
+| Cast cửa sổ (scale vào 1920×1080, viền đen) | 59–60 fps, 29,7–30,2 Mbps, encode 12–13 ms |
+| `keyframe_request` từ receiver | đếm trên GUI, QSV ép IDR |
+| Dừng / đóng cửa sổ | receiver nhận `stop`, kết nối đóng, process thoát |
+| TV giả quảng bá mDNS (`--example advertise`) | hiện trong danh sách < 2,5 s, tự chọn |
+| `nanocast.exe` release | 7,1 MB, subsystem GUI |
+
+Chưa kiểm chứng trên TV thật.

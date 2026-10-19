@@ -88,9 +88,9 @@ Mục tiêu: cast được, đo được số, dùng được trong lớp.
 - [ ] Khởi tạo Cargo workspace (`core`, `app`, `receiver-desktop`), CI GitHub Actions build Windows.
 - [ ] `Capturer` Windows: WGC màn hình + cửa sổ (crate `windows-capture` hoặc `windows-rs` trực tiếp), lấy D3D11 texture, phát hiện khung không đổi để bỏ qua.
 - [ ] `Encoder` Windows: Media Foundation H.264 HW, nhận D3D11 texture (DXGI device manager), low-latency mode, CBR, không B-frame, GOP vô hạn + intra-refresh. Benchmark trên máy iGPU Intel đời 2015.
-- [ ] Packetizer UDP + control TCP + mDNS browse.
+- [x] Packetizer UDP + control TCP + mDNS browse.
 - [ ] Audio: WASAPI loopback (`cpal`) → Opus (`audiopus`), toggle.
-- [ ] GUI egui: danh sách TV tự cập nhật, nút Cast màn hình / Cast app (chọn từ danh sách cửa sổ) / Âm thanh / Dừng, hiển thị fps + bitrate + ms.
+- [x] GUI egui: danh sách TV tự cập nhật, nút Cast màn hình / Cast app (chọn từ danh sách cửa sổ) / Âm thanh / Dừng, hiển thị fps + bitrate + ms. *(nút Âm thanh để disabled tới Phase 1b)*
 - [ ] Receiver Android TV (Kotlin): NsdManager quảng bá, nhận UDP, ráp frame, MediaCodec `KEY_LOW_LATENCY`, SurfaceView, AudioTrack. APK sideload + Play Store (free).
 - [ ] Đo trễ bằng quay 240 fps, ghi `docs/benchmark.md`. Tối ưu cho tới khi đạt §7.
 
@@ -153,7 +153,8 @@ NANOCast/
 ├── tools/icongen/          # render SVG -> PNG/ICO/mipmap Android (cargo run -p icongen)
 ├── crates/
 │   ├── core/               # protocol, au, discovery, trait capture/encoder (có)
-│   ├── app/                # GUI egui (sender); build.rs nhúng icon
+│   ├── app/                # nanocast.exe: GUI egui (sender); build.rs nhúng icon
+│   ├── win-capture/        # nanocast-win: WGC → NV12 → MF H.264 → UDP + control (CastSession)
 │   ├── spike-win/          # spike capture+encode+stream Windows (có)
 │   ├── spike-send/         # gửi file .h264 qua UDP để test receiver (có)
 │   └── receiver-desktop/   # receiver Rust cho PC cũ / Pi (Phase 2)
@@ -175,3 +176,9 @@ NANOCast/
 4. ~~Kênh control TCP (hello/caps/keyframe_request/audio on-off) ở cả hai phía~~
    **Xong 2026-10-19**: `nanocast_core::control`, `spike-win` (hello/start/stop, keyframe_request → ép IDR), receiver Android (caps, keyframe_request, stats 1 s, TXT `ctrl`). Kiểm chứng trên emulator, chưa trên TV thật; `audio` mới chỉ được nhận/ghi log (chưa có đường âm thanh).
    Tiếp theo: GUI egui dùng kênh này.
+5. ~~Phase 1 GUI: `nanocast.exe` dùng được~~ **Xong 2026-10-19**:
+   - `crates/win-capture` (`nanocast-win`): capture WGC + pacing fps, NV12 (CPU) vào khung cố định (màn hình: kích thước thật, tối đa 1080p; cửa sổ: 1920×1080, co giãn giữ tỉ lệ + viền đen nên đổi cỡ cửa sổ không cần stream mới), `MfEncoder` (thử lần lượt HW encoder theo merit, bỏ qua cái lỗi kể cả khi lỗi ở khung đầu; Shutdown MFT khi giải phóng), `ControlLink`, `CastSession` (luồng riêng, dừng sạch theo thứ tự capture → mạng → encoder → `stop`). `spike-win` dùng lại crate này.
+   - `crates/app`: GUI eframe/egui (glow), tiếng Việt (font Segoe UI của Windows), danh sách TV mDNS liên tục (`discovery::Browser`) + Quét lại + nhập IP tay, Cast màn hình (chọn màn hình), Cast ứng dụng… (lọc cửa sổ), Dừng, trạng thái PC/TV/keyframe_request, Cài đặt encoder/bitrate/fps. Release: subsystem GUI (không console), 7,1 MB, không cần admin.
+   - Kiểm chứng trên máy dev: NVIDIA MFT lỗi → tự dùng QSV; cast màn hình và cửa sổ tới receiver giả (Python, 127.0.0.1) 60 fps, 20–30 Mbps, encode ~12 ms; `hello/start/stop`, `stats`, `keyframe_request` hiện trên GUI; Dừng và đóng cửa sổ đều gửi `stop` và thoát sạch; TV giả quảng bá mDNS hiện trong danh sách < 2,5 s.
+   - Chưa: âm thanh (Phase 1b), TV thật trên LAN thật, chọn IP đúng subnet khi receiver có nhiều IP (hiện lấy IPv4 nhỏ nhất), lưu cài đặt, GPU color convert/zero-copy, scale chất lượng cao (đang nearest-neighbour).
+   Tiếp theo: thử với TV/box Android thật + đo glass-to-glass; Phase 1b audio.
