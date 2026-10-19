@@ -24,6 +24,8 @@ log = "0.4"
 env_logger = "0.11"
 nanocast-core = { path = "crates/core" }
 nanocast-win = { path = "crates/win-capture" }
+nanocast-mac = { path = "crates/mac-capture" }
+nanocast-linux = { path = "crates/linux-capture" }
 
 [profile.release]
 opt-level = 3

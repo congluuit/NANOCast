@@ -1,5 +1,7 @@
 //! Spike: stream an H.264 Annex B file (e.g. the `out.h264` written by `spike-win`) to a
-//! NANOCast receiver over UDP using the core protocol, paced at a fixed fps.
+//! NANOCast receiver over UDP using the core protocol, paced at a fixed fps. A file named
+//! `*.h265` / `*.hevc` (`spike-win --codec hevc --out x.h265`) is split as HEVC; the
+//! receiver must be told `start {codec: "hevc"}` (e.g. `ctrl_probe --codec hevc`).
 //!
 //! Usage:
 //!   spike-send <file.h264> [--to 192.168.1.50:48322] [--fps 60] [--pace-mbps 80]
@@ -17,7 +19,7 @@ use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context as _, Result};
-use nanocast_core::au::{is_keyframe, split_access_units};
+use nanocast_core::au::{is_keyframe, is_keyframe_hevc, split_access_units, split_access_units_hevc};
 use nanocast_core::protocol::{
     sleep_until, AudioHeader, PacedSender, AUDIO_FRAME_MS, AUDIO_PORT, MAX_PACKETS_PER_FRAME, MAX_PAYLOAD, VIDEO_PORT,
 };
@@ -89,11 +91,13 @@ fn main() -> Result<()> {
         return audio.unwrap().join().unwrap();
     }
     let data = std::fs::read(&args.file).with_context(|| format!("reading {}", args.file))?;
-    let aus = split_access_units(&data);
+    let lower = args.file.to_ascii_lowercase();
+    let hevc = lower.ends_with(".h265") || lower.ends_with(".hevc");
+    let aus = if hevc { split_access_units_hevc(&data) } else { split_access_units(&data) };
     if aus.is_empty() {
-        bail!("no H.264 NAL units found in {}", args.file);
+        bail!("no {} NAL units found in {}", if hevc { "HEVC" } else { "H.264" }, args.file);
     }
-    let keyframes = aus.iter().filter(|au| is_keyframe(au)).count();
+    let keyframes = aus.iter().filter(|au| if hevc { is_keyframe_hevc(au) } else { is_keyframe(au) }).count();
     let max_au = aus.iter().map(|au| au.len()).max().unwrap_or(0);
     if max_au.div_ceil(MAX_PAYLOAD) > MAX_PACKETS_PER_FRAME {
         bail!("largest frame is {max_au} B = more than {MAX_PACKETS_PER_FRAME} packets; lower the bitrate");

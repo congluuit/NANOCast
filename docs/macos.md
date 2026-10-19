@@ -51,7 +51,7 @@ Chưa kiểm chứng (cần Mac):
 7. Cửa sổ bị đóng -> `SourceClosed` (qua `stream:didStopWithError:` hoặc `CGWindowListCopyWindowInfo` mỗi giây).
 8. Độ trễ, fps thật (queueDepth 3 có đủ không), CPU.
 9. Quyền Screen Recording / Local Network khi chạy từ `.app` ký ad-hoc.
-10. GUI `crates/app` trên macOS (chưa nối, xem mục 4).
+10. GUI `crates/app` trên macOS (đã nối, chưa chạy; xem mục 4).
 
 ## 3. Build và chạy thử trên Mac mini
 
@@ -129,9 +129,11 @@ Chạy app tải từ mạng về (bị Gatekeeper chặn vì chưa notarize): c
 xattr -dr com.apple.quarantine /Applications/NANOCast.app
 ```
 
-## 4. Nối GUI `crates/app` (chưa làm, vì phiên này không được sửa `crates/app`)
+## 4. GUI `crates/app` trên macOS (đã nối 2026-10-19, chưa chạy trên Mac)
 
-API giống hệt nhau, nên chỉ cần đổi chỗ chọn crate:
+Đã làm đúng các bước dưới đây (`cargo clippy -p nanocast --target aarch64-apple-darwin` / `x86_64-apple-darwin` sạch). Thêm so với Windows: tạm dừng / màn hình đen / mã 4 số dùng chung; bitrate thích nghi chỉ đổi bitrate (`VtEncoder::set_bitrate`, fps giữ nguyên vì đổi fps phải khởi động lại SCStream); chọn HEVC thì vẫn gửi H.264 (`CodecFallback::NoEncoder`, HEVC qua VideoToolbox chưa làm). `ControlLink` nay nằm trong `nanocast_core::control_link` (hai crate chỉ re-export).
+
+Các bước (để tham khảo):
 
 1. `crates/app/Cargo.toml`: thêm khối sau (eframe có thể chuyển lên dependency chung cho cả hai OS); thêm `nanocast-mac = { path = "crates/mac-capture" }` vào `[workspace.dependencies]` của `Cargo.toml` gốc.
    ```toml

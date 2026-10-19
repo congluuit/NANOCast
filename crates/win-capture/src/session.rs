@@ -33,6 +33,8 @@ use crate::sources;
 
 /// Largest picture sent, whatever the monitor (receivers are 1080p TVs).
 pub const MAX_CANVAS: (u32, u32) = (1920, 1080);
+/// How long after an on-the-fly bitrate change the real rate is compared with the target.
+const BITRATE_CHECK_AFTER: Duration = Duration::from_millis(1500);
 
 #[derive(Clone, Debug)]
 pub struct CastConfig {
@@ -554,6 +556,12 @@ fn run(cfg: &CastConfig, controls: &Controls, stats: &Mutex<CastStats>) -> Resul
     let mut converted = 0u64;
     let mut last_alive_check = Instant::now();
     let (mut paused, mut blank) = (false, false);
+    // On-the-fly bitrate change to verify: (target Mbps, when to look).
+    let mut bitrate_check: Option<(u32, Instant)> = None;
+    // Set once this encoder accepted a dynamic bitrate change but kept the old rate
+    // (seen with Intel QSV): from then on every change reopens the encoder.
+    let mut dynamic_ignored = false;
+    let mut reopen_pending = false;
 
     let reason = loop {
         if stop.load(Ordering::Relaxed) {
@@ -600,25 +608,32 @@ fn run(cfg: &CastConfig, controls: &Controls, stats: &Mutex<CastStats>) -> Resul
             }
         }
 
-        // Adaptive bitrate: at most one change per receiver report.
+        // Adaptive bitrate: at most one change per receiver report. The bitrate is first
+        // changed on the fly; `bitrate_check` then verifies that the MFT honoured it.
+        let mut reopen = std::mem::take(&mut reopen_pending);
         if let (Some(a), Some(l)) = (adapter.as_mut(), link.as_ref()) {
             if let Some(next) = a.poll(l, &wire, sink.total) {
                 enc_cfg.bitrate_bps = next.mbps * 1_000_000;
                 interval_us.store(1_000_000 / next.fps.max(1) as u64, Ordering::Relaxed);
-                let reopen = next.fps != target.fps || !encoder.set_bitrate(enc_cfg.bitrate_bps);
-                if reopen {
-                    // A new encoder starts with an IDR, so the TV resyncs by itself.
-                    enc_cfg.fps = next.fps;
-                    enc_cfg.gop_frames = gop(next.fps);
-                    let name = encoder.name.clone();
-                    drop(encoder); // free the hardware session before opening the next one
-                    encoder = open_encoder(&mut enc_cfg, Some(&name), &bad_encoders, &mut fallback)?;
-                    stats.lock().unwrap().encoder = encoder.name.clone();
+                bitrate_check = None;
+                if next.fps != target.fps || dynamic_ignored || !encoder.set_bitrate(enc_cfg.bitrate_bps) {
+                    reopen = true;
+                } else {
+                    bitrate_check = Some((next.mbps, Instant::now() + BITRATE_CHECK_AFTER));
                 }
                 target = next;
                 let mut s = stats.lock().unwrap();
                 (s.target_mbps, s.target_fps, s.adapt_reason) = (target.mbps, target.fps, a.ctl.reason());
             }
+        }
+        if reopen {
+            // A new encoder starts with an IDR, so the TV resyncs by itself.
+            enc_cfg.fps = target.fps;
+            enc_cfg.gop_frames = gop(target.fps);
+            let name = encoder.name.clone();
+            drop(encoder); // free the hardware session before opening the next one
+            encoder = open_encoder(&mut enc_cfg, Some(&name), &bad_encoders, &mut fallback)?;
+            stats.lock().unwrap().encoder = encoder.name.clone();
         }
 
         let step = match rx.recv_timeout(Duration::from_millis(5)) {
@@ -666,6 +681,22 @@ fn run(cfg: &CastConfig, controls: &Controls, stats: &Mutex<CastStats>) -> Resul
             s.keyframes = sink.keyframes;
             s.frames_dropped = counters.dropped.load(Ordering::Relaxed) as u64 + sink.net.dropped;
             (s.paused, s.blank) = (paused, blank);
+            // Judged only while frames flow (a static screen is below any target anyway).
+            if let Some((want, at)) = bitrate_check {
+                if Instant::now() >= at && s.fps >= 20.0 {
+                    bitrate_check = None;
+                    if s.mbps > want as f64 * 1.25 {
+                        warn!(
+                            "encoder {} accepted {want} Mbps on the fly but still sends {:.1} Mbps; reopening it for every change",
+                            encoder.name, s.mbps
+                        );
+                        dynamic_ignored = true;
+                        reopen_pending = true;
+                    } else {
+                        info!("encoder {}: on-the-fly bitrate verified ({:.1} Mbps for {want})", encoder.name, s.mbps);
+                    }
+                }
+            }
             let audio_bytes = audio.counters.bytes.load(Ordering::Relaxed);
             s.audio_kbps = (audio_bytes - audio.last_bytes) as f64 * 8.0 / secs / 1e3;
             audio.last_bytes = audio_bytes;

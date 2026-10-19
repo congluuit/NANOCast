@@ -6,8 +6,15 @@ import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import java.net.SocketException
 
-/** Blocking UDP receive loop on its own high-priority thread. */
-class UdpReceiver(private val port: Int, private val assembler: FrameAssembler) {
+/**
+ * Blocking UDP receive loop on its own high-priority thread. [allow] filters by source
+ * address (4-digit code on: only the sender that gave the right code).
+ */
+class UdpReceiver(
+    private val port: Int,
+    private val assembler: FrameAssembler,
+    private val allow: (java.net.InetAddress) -> Boolean = { true },
+) {
     @Volatile private var socket: DatagramSocket? = null
     private var thread: Thread? = null
 
@@ -32,7 +39,7 @@ class UdpReceiver(private val port: Int, private val assembler: FrameAssembler) 
             try {
                 packet.setLength(buf.size)
                 s.receive(packet)
-                assembler.onPacket(buf, packet.length, System.nanoTime())
+                if (allow(packet.address)) assembler.onPacket(buf, packet.length, System.nanoTime())
             } catch (e: SocketException) {
                 break // closed by stop()
             } catch (e: Exception) {

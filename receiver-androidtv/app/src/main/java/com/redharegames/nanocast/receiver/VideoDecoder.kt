@@ -2,6 +2,7 @@ package com.redharegames.nanocast.receiver
 
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.os.Build
 import android.os.Handler
@@ -11,12 +12,15 @@ import android.view.Surface
 import java.nio.ByteBuffer
 
 /**
- * Hardware H.264 decoder rendering straight to a Surface, tuned for latency:
+ * Hardware H.264 / HEVC decoder rendering straight to a Surface, tuned for latency:
  * one access unit per input buffer, output released for rendering the moment it appears.
+ * The codec follows `start.codec` ([setCodec]); HEVC is only offered in `caps` when this
+ * device has an HEVC decoder ([hasDecoder]).
  *
  * Uses MediaCodec's async mode on a dedicated thread. [submit] may be called from the
  * network thread; frames wait in a small queue only if the codec has no free input buffer.
- * The codec is created lazily from the first access unit that carries SPS + PPS.
+ * The codec is created lazily from the first access unit that carries the parameter sets
+ * (H.264: SPS + PPS; HEVC: VPS + SPS + PPS).
  *
  * [onNeedKeyframe] is called (with a reason) whenever frames are being discarded while waiting
  * for an IDR: no decoder yet / after a codec error, or after the backlog was flushed. It is
@@ -45,14 +49,31 @@ class VideoDecoder(
     private val arrivalNs = LongArray(512)
     private val arrivalId = LongArray(512) { -1 }
 
+    /** `pause {on}`: keep decoding but do not render, so the last picture stays on the Surface. */
+    @Volatile var hold = false
+
+    /** MediaCodec MIME type of the stream (`start.codec`). */
+    private var mime = MediaFormat.MIMETYPE_VIDEO_AVC
+
+    /** Switches to the codec named in `start` ("h264" / "hevc"); a change recreates the decoder. */
+    fun setCodec(codec: String) {
+        val m = if (codec.equals(Protocol.CODEC_HEVC, ignoreCase = true)) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
+        synchronized(lock) {
+            if (m == mime) return
+            Log.i(TAG, "codec $mime -> $m")
+            mime = m
+            releaseLocked() // the next keyframe with parameter sets starts the new decoder
+        }
+    }
+
     fun submit(frameId: Long, data: ByteArray, completeNs: Long) {
         synchronized(lock) {
+            val hevc = mime == MediaFormat.MIMETYPE_VIDEO_HEVC
             if (codec == null) {
                 if (!starting) {
-                    val sps = H264.findNal(data, 7)
-                    val pps = H264.findNal(data, 8)
-                    if (sps == null || pps == null) {
-                        stats.droppedFrames.incrementAndGet() // waiting for a keyframe with SPS/PPS
+                    val csd = Nal.parameterSets(data, hevc)
+                    if (csd == null) {
+                        stats.droppedFrames.incrementAndGet() // waiting for a keyframe with parameter sets
                         onNeedKeyframe("decoder_start")
                         return
                     }
@@ -60,14 +81,15 @@ class VideoDecoder(
                     // thread keeps draining the socket (otherwise the receive buffer overflows).
                     starting = true
                     val gen = generation
-                    handler.post { startOnDecoderThread(gen, sps, pps) }
+                    val m = mime
+                    handler.post { startOnDecoderThread(gen, m, csd) }
                 }
                 // Queued during startup: kept for decoding but excluded from latency stats.
                 if (pending.size < MAX_PENDING) pending.addLast(frameId to data) else stats.droppedFrames.incrementAndGet()
                 return
             }
             if (needKeyframe) {
-                if (H264.findNal(data, 5) == null) {
+                if (!Nal.isKeyframe(data, hevc)) {
                     stats.droppedFrames.incrementAndGet()
                     onNeedKeyframe("decoder_backlog") // repeats (rate-limited) in case the IDR got lost
                     return
@@ -80,7 +102,7 @@ class VideoDecoder(
                 // The IDR is requested over the control channel instead of waiting for the GOP.
                 stats.droppedFrames.addAndGet(pending.size.toLong())
                 pending.clear()
-                needKeyframe = H264.findNal(data, 5) == null
+                needKeyframe = !Nal.isKeyframe(data, hevc)
                 if (needKeyframe) {
                     stats.droppedFrames.incrementAndGet()
                     onNeedKeyframe("decoder_backlog")
@@ -123,9 +145,9 @@ class VideoDecoder(
     }
 
     /** Runs on the decoder thread without holding [lock]. */
-    private fun startOnDecoderThread(gen: Int, sps: ByteArray, pps: ByteArray) {
+    private fun startOnDecoderThread(gen: Int, mime: String, csd: List<ByteArray>) {
         val c = try {
-            createCodec(gen, sps, pps)
+            createCodec(gen, mime, csd)
         } catch (e: Exception) {
             Log.e(TAG, "decoder start failed", e)
             stats.decoderErrors.incrementAndGet()
@@ -142,21 +164,20 @@ class VideoDecoder(
             warmingUp = true
             feedLocked()
         }
-        describe(c ?: return)
+        describe(c ?: return, mime)
         Log.i(TAG, "decoder started: ${stats.codecName} ${stats.codecInfo}")
     }
 
-    private fun createCodec(gen: Int, sps: ByteArray, pps: ByteArray): MediaCodec {
-        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, Protocol.WIDTH, Protocol.HEIGHT).apply {
-            setByteBuffer("csd-0", ByteBuffer.wrap(sps))
-            setByteBuffer("csd-1", ByteBuffer.wrap(pps))
+    private fun createCodec(gen: Int, mime: String, csd: List<ByteArray>): MediaCodec {
+        val format = MediaFormat.createVideoFormat(mime, Protocol.WIDTH, Protocol.HEIGHT).apply {
+            csd.forEachIndexed { i, b -> setByteBuffer("csd-$i", ByteBuffer.wrap(b)) }
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 2 * 1024 * 1024)
             setInteger(MediaFormat.KEY_PRIORITY, 0) // realtime
             setInteger(MediaFormat.KEY_OPERATING_RATE, Protocol.FPS)
             if (Build.VERSION.SDK_INT >= 30) setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
         }
 
-        val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        val c = MediaCodec.createDecoderByType(mime)
         try {
             c.setCallback(Callback(gen), handler)
             try {
@@ -180,7 +201,7 @@ class VideoDecoder(
         return c
     }
 
-    private fun describe(c: MediaCodec) {
+    private fun describe(c: MediaCodec, mime: String) {
         stats.codecName = c.name
         val info = c.codecInfo
         val parts = mutableListOf<String>()
@@ -188,7 +209,7 @@ class VideoDecoder(
             parts += if (info.isHardwareAccelerated) "HW" else "SW"
         }
         if (Build.VERSION.SDK_INT >= 30) {
-            val caps = info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            val caps = info.getCapabilitiesForType(mime)
             val ll = caps.isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency)
             parts += "low-latency " + if (ll) "yes" else "no"
         } else {
@@ -210,7 +231,7 @@ class VideoDecoder(
             val now = System.nanoTime()
             val frameId = (info.presentationTimeUs + FRAME_US / 2) / FRAME_US
             try {
-                codec.releaseOutputBuffer(index, info.size > 0)
+                codec.releaseOutputBuffer(index, info.size > 0 && !hold)
             } catch (e: IllegalStateException) {
                 return
             }
@@ -258,24 +279,67 @@ class VideoDecoder(
         thread.quitSafely()
     }
 
-    private companion object {
-        const val TAG = "NANOCast.Decoder"
-        const val FRAME_US = 1_000_000L / 60 // synthetic pts: frame_id * 16666 µs
-        const val MAX_PENDING = 60 // ~1 s at 60 fps
+    companion object {
+        private const val TAG = "NANOCast.Decoder"
+        private const val FRAME_US = 1_000_000L / 60 // synthetic pts: frame_id * 16666 µs
+        private const val MAX_PENDING = 60 // ~1 s at 60 fps
+
+        /** Whether this device can decode [mime] at 1080p (for `caps.codecs` / TXT `codec`). */
+        fun hasDecoder(mime: String): Boolean = try {
+            val format = MediaFormat.createVideoFormat(mime, Protocol.WIDTH, Protocol.HEIGHT)
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).findDecoderForFormat(format) != null
+        } catch (e: Exception) {
+            false
+        }
+
+        /** Codecs to advertise: H.264 always, HEVC when there is a decoder. */
+        val supportedCodecs: List<String> by lazy {
+            listOf(Protocol.CODEC_H264) +
+                if (hasDecoder(MediaFormat.MIMETYPE_VIDEO_HEVC)) listOf(Protocol.CODEC_HEVC) else emptyList()
+        }
     }
+}
+
+/** NAL helpers for H.264 and HEVC Annex B access units. */
+object Nal {
+    /** NAL unit type of the header byte at the start of a NAL. */
+    private fun type(b: Byte, hevc: Boolean): Int = if (hevc) (b.toInt() shr 1) and 0x3F else b.toInt() and 0x1F
+
+    /**
+     * MediaFormat codec-specific data from a keyframe: H.264 [SPS, PPS] (csd-0, csd-1),
+     * HEVC [VPS + SPS + PPS] (one csd-0). Null when they are not all there.
+     */
+    fun parameterSets(au: ByteArray, hevc: Boolean): List<ByteArray>? {
+        if (!hevc) {
+            val sps = H264.findNal(au, 7) ?: return null
+            val pps = H264.findNal(au, 8) ?: return null
+            return listOf(sps, pps)
+        }
+        val vps = H264.findNal(au) { type(it, true) == 32 } ?: return null
+        val sps = H264.findNal(au) { type(it, true) == 33 } ?: return null
+        val pps = H264.findNal(au) { type(it, true) == 34 } ?: return null
+        return listOf(vps + sps + pps)
+    }
+
+    /** IDR (H.264 type 5) / IRAP (HEVC types 16..21: BLA, IDR, CRA). */
+    fun isKeyframe(au: ByteArray, hevc: Boolean): Boolean =
+        if (hevc) H264.findNal(au) { type(it, true) in 16..21 } != null else H264.findNal(au, 5) != null
 }
 
 /** Minimal Annex B helpers. */
 object H264 {
     /** Returns the first NAL of [type] including its 4-byte start code, or null. */
-    fun findNal(au: ByteArray, type: Int): ByteArray? {
+    fun findNal(au: ByteArray, type: Int): ByteArray? = findNal(au) { (it.toInt() and 0x1F) == type }
+
+    /** Returns the first NAL whose header byte matches, including a 4-byte start code, or null. */
+    fun findNal(au: ByteArray, header: (Byte) -> Boolean): ByteArray? {
         var i = 0
         while (true) {
             val start = nextStartCode(au, i) ?: return null
             val hdr = start.second
             if (hdr >= au.size) return null
             val end = nextStartCode(au, hdr)?.first ?: au.size
-            if ((au[hdr].toInt() and 0x1F) == type) {
+            if (header(au[hdr])) {
                 val nal = ByteArray(4 + end - hdr)
                 nal[3] = 1
                 System.arraycopy(au, hdr, nal, 4, end - hdr)

@@ -63,7 +63,9 @@ pub struct EncodedFrame {
 }
 
 /// Names for the GUI's encoder list. VideoToolbox picks the hardware block itself.
-pub fn hw_encoder_names() -> Result<Vec<String>> {
+/// HEVC is not wired up on macOS yet (the session sends H.264 and reports
+/// `CodecFallback::NoEncoder`), so the list is the same for both codecs.
+pub fn hw_encoder_names(_codec: nanocast_core::protocol::VideoCodec) -> Result<Vec<String>> {
     Ok(vec![ENCODER_NAME.to_string()])
 }
 
@@ -168,6 +170,30 @@ impl VtEncoder {
     /// The next submitted frame becomes an IDR (with SPS/PPS in front).
     pub fn request_keyframe(&mut self) {
         self.force_keyframe = true;
+    }
+
+    /// Changes the target bitrate while encoding (AverageBitRate and the 1.5x ceiling are
+    /// both live properties). `false` if VideoToolbox refused; the caller then reopens.
+    pub fn set_bitrate(&mut self, bitrate_bps: u32) -> bool {
+        let s = &self.session;
+        let r = unsafe {
+            set(s, kVTCompressionPropertyKey_AverageBitRate, &CFNumber::new_i64(bitrate_bps as i64)).and_then(|()| {
+                let bytes = CFNumber::new_i64(bitrate_bps as i64 / 8 * 3 / 2);
+                let secs = CFNumber::new_f64(1.0);
+                let limits = CFArray::<CFNumber>::from_objects(&[&*bytes, &*secs]);
+                set(s, kVTCompressionPropertyKey_DataRateLimits, &limits)
+            })
+        };
+        match r {
+            Ok(()) => {
+                info!("encoder: bitrate now {} kbps (on the fly)", bitrate_bps / 1000);
+                true
+            }
+            Err(e) => {
+                warn!("encoder: dynamic bitrate change refused ({e:#}); reopening");
+                false
+            }
+        }
     }
 
     /// Frames VideoToolbox decided to drop (rate control), for stats.

@@ -16,6 +16,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use nanocast_core::audio::{OpusDecoder, Resampler, FRAME_LEN};
 use nanocast_core::protocol::{AudioHeader, AUDIO_FRAME_SAMPLES, AUDIO_HEADER_LEN, AUDIO_SAMPLE_RATE};
 
+use crate::control::ControlServer;
 use crate::stats::Stats;
 
 /// Start (or restart after an underrun) once this much is buffered.
@@ -144,8 +145,9 @@ fn build_stream(
 }
 
 /// Receives and plays audio until the process exits. The output device is opened on the
-/// first packet (so a receiver without sound hardware still shows video).
-pub fn run(bind: SocketAddr, stats: Arc<Stats>) -> Result<()> {
+/// first packet (so a receiver without sound hardware still shows video). Packets from an
+/// address the control server does not allow (4-digit code on) are ignored.
+pub fn run(bind: SocketAddr, stats: Arc<Stats>, control: ControlServer) -> Result<()> {
     let sock = UdpSocket::bind(bind).with_context(|| format!("binding audio UDP {bind}"))?;
     sock.set_read_timeout(Some(Duration::from_millis(500)))?;
     log::info!("audio listening on UDP {bind}");
@@ -158,8 +160,9 @@ pub fn run(bind: SocketAddr, stats: Arc<Stats>) -> Result<()> {
     let silence = vec![0f32; FRAME_LEN];
     let mut last_seq: Option<u32> = None;
     loop {
-        let n = match sock.recv(&mut buf) {
-            Ok(n) => n,
+        let n = match sock.recv_from(&mut buf) {
+            Ok((n, from)) if control.allows(from.ip()) => n,
+            Ok(_) => continue,
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
                 last_seq = None; // stream paused: next packet starts fresh
                 continue;

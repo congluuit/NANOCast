@@ -11,6 +11,8 @@ package com.redharegames.nanocast.receiver
  * Audio packet (UDP [AUDIO_PORT]) = 10-byte header + one 20 ms Opus frame, 48 kHz stereo:
  *   magic u16 = [AUDIO_MAGIC] | seq u32 | pts_ms u32
  * An empty payload means 20 ms of silence (see [AudioPlayer]).
+ *
+ * The video payload is H.264 or, when `start.codec` says so, HEVC (both Annex B).
  */
 object Protocol {
     const val VIDEO_PORT = 48322
@@ -30,6 +32,12 @@ object Protocol {
     const val AUDIO_FRAME_SAMPLES = 960
     /** Sender's Opus encoder delay in samples (libopus application Audio at 48 kHz). */
     const val OPUS_PRE_SKIP = 312
+
+    /** Codec names in `start.codec` / `caps.codecs` / TXT `codec` (`VideoCodec` in protocol.rs). */
+    const val CODEC_H264 = "h264"
+    const val CODEC_HEVC = "hevc"
+    /** `error.code` for a `hello` without the right 4-digit code. */
+    const val ERR_BAD_PIN = "bad_pin"
 
     const val SERVICE_TYPE = "_nanocast._udp"
     const val VERSION = "0.1"

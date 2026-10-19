@@ -70,6 +70,8 @@ struct Overlay {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
     TopLeft,
+    /// Small badge in the top-right corner (paused sign).
+    TopRight,
     Center,
 }
 
@@ -319,6 +321,7 @@ impl Renderer {
             let (w, h) = (o.width as f32 * 2.0 / sw, o.height as f32 * 2.0 / sh);
             let (x0, y0) = match placement {
                 Placement::TopLeft => (-1.0 + 16.0 / sw, 1.0 - 16.0 / sh),
+                Placement::TopRight => (1.0 - w - 16.0 / sw, 1.0 - 16.0 / sh),
                 Placement::Center => (-w / 2.0, h / 2.0),
             };
             // Snap to whole pixels so the bitmap font stays crisp.

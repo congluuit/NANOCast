@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use log::{error, info, warn};
-use nanocast_core::control::Message;
-use nanocast_core::protocol::{PacedSender, AUDIO_PORT, MAX_PAYLOAD};
+use nanocast_core::adapt::{self, AdaptReason, Adaptive};
+use nanocast_core::control::{Message, ERR_BAD_PIN};
+use nanocast_core::protocol::{PacedSender, VideoCodec, AUDIO_PORT, MAX_PAYLOAD};
 
 use crate::audio::{AudioCounters, AudioSender, AudioTap};
 use crate::capture::{self, CaptureCounters, CaptureFlags, CapturedFrame, Source};
@@ -35,9 +36,18 @@ pub struct CastConfig {
     pub ctrl_port: u16,
     pub source: Source,
     pub fps: u32,
+    /// Starting bitrate, also the ceiling of the adaptive bitrate.
     pub bitrate_mbps: u32,
     /// Kept for API parity with Windows; a Mac has one H.264 encoder (VideoToolbox).
     pub encoder: Option<String>,
+    /// Wanted codec. HEVC is not implemented on macOS yet: H.264 is sent and
+    /// `CastStats::codec_fallback` says why.
+    pub codec: VideoCodec,
+    /// Lower / raise the bitrate from the receiver's reports (needs the control channel).
+    /// On macOS the frame rate stays fixed (changing it would restart the SCStream).
+    pub adaptive: bool,
+    /// The receiver's 4-digit code (`hello.pin`), when it asks for one.
+    pub pin: Option<String>,
     /// Packet pacing ceiling (PLAN.md section 4: default 80 Mbps).
     pub pace_mbps: u64,
     /// Shown on the TV (`hello.name`).
@@ -52,6 +62,17 @@ pub enum EndReason {
     Stopped,
     /// The captured window was closed (or the display went away).
     SourceClosed,
+    /// The receiver wants a 4-digit code and `CastConfig::pin` was missing or wrong.
+    PinRejected,
+}
+
+/// Why HEVC was asked for but H.264 is sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodecFallback {
+    /// `caps.codecs` has no "hevc" (or there is no control channel to ask).
+    ReceiverH264Only,
+    /// No HEVC encoder (on macOS: not implemented yet).
+    NoEncoder,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -67,6 +88,9 @@ pub enum Phase {
 pub struct CastStats {
     pub phase: Phase,
     pub encoder: String,
+    /// Codec actually sent.
+    pub codec: VideoCodec,
+    pub codec_fallback: Option<CodecFallback>,
     /// Encoded picture size.
     pub size: (u32, u32),
     /// Averages over the last ~0.5 s.
@@ -82,6 +106,16 @@ pub struct CastStats {
     /// Frames skipped because the encoder or the network was busy (or dropped by rate control).
     pub frames_dropped: u64,
     pub keyframe_requests: usize,
+    /// Current encoder target (follows the adaptive bitrate).
+    pub target_mbps: u32,
+    pub target_fps: u32,
+    /// Why the target is what it is (`AdaptReason::Start` = configured values).
+    pub adapt_reason: AdaptReason,
+    /// Adaptive bitrate running (asked for and a control channel is there).
+    pub adaptive: bool,
+    /// `pause {on}` / `blank {on}` in effect (frames are not encoded).
+    pub paused: bool,
+    pub blank: bool,
     /// `None` when the receiver has no control channel (UDP only).
     pub receiver: Option<ReceiverReport>,
     /// Audio capture running (follows `set_audio`, false if unavailable).
@@ -92,9 +126,17 @@ pub struct CastStats {
     pub audio_error: Option<String>,
 }
 
+/// Switches shared between the GUI and the cast thread.
+#[derive(Default)]
+struct Controls {
+    stop: AtomicBool,
+    audio: AtomicBool,
+    pause: AtomicBool,
+    blank: AtomicBool,
+}
+
 pub struct CastSession {
-    stop: Arc<AtomicBool>,
-    audio: Arc<AtomicBool>,
+    controls: Arc<Controls>,
     stats: Arc<Mutex<CastStats>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -102,15 +144,14 @@ pub struct CastSession {
 impl CastSession {
     /// Starts casting in the background. Failures show up as `Phase::Failed` in `stats()`.
     pub fn start(cfg: CastConfig) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let audio = Arc::new(AtomicBool::new(cfg.audio));
+        let controls = Arc::new(Controls { audio: AtomicBool::new(cfg.audio), ..Default::default() });
         let stats = Arc::new(Mutex::new(CastStats::default()));
         let thread = {
-            let (stop, audio, stats) = (stop.clone(), audio.clone(), stats.clone());
+            let (controls, stats) = (controls.clone(), stats.clone());
             std::thread::Builder::new()
                 .name("cast".into())
                 .spawn(move || {
-                    let phase = match run(&cfg, &stop, &audio, &stats) {
+                    let phase = match run(&cfg, &controls, &stats) {
                         Ok(reason) => {
                             info!("cast ended: {reason:?}");
                             Phase::Ended(reason)
@@ -124,12 +165,22 @@ impl CastSession {
                 })
                 .expect("spawn cast thread")
         };
-        Self { stop, audio, stats, thread: Some(thread) }
+        Self { controls, stats, thread: Some(thread) }
     }
 
     /// Switches system sound on or off; takes effect within one video frame and never blocks.
     pub fn set_audio(&self, on: bool) {
-        self.audio.store(on, Ordering::Relaxed);
+        self.controls.audio.store(on, Ordering::Relaxed);
+    }
+
+    /// Pause: the TV keeps the last picture; frames and sound are not sent until resumed.
+    pub fn set_paused(&self, on: bool) {
+        self.controls.pause.store(on, Ordering::Relaxed);
+    }
+
+    /// Blank: the TV shows black; like pause, nothing is sent meanwhile.
+    pub fn set_blank(&self, on: bool) {
+        self.controls.blank.store(on, Ordering::Relaxed);
     }
 
     pub fn stats(&self) -> CastStats {
@@ -143,7 +194,7 @@ impl CastSession {
 
     /// Stops and waits (up to 3 s) until capture, encoder and control channel are released.
     pub fn stop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.controls.stop.store(true, Ordering::Relaxed);
         let Some(thread) = self.thread.take() else { return };
         let deadline = Instant::now() + Duration::from_secs(3);
         while !thread.is_finished() && Instant::now() < deadline {
@@ -172,7 +223,7 @@ struct NetSender {
 }
 
 impl NetSender {
-    fn start(sock: UdpSocket, pace_mbps: u64, sent_bytes: Arc<AtomicU64>) -> Result<Self> {
+    fn start(sock: UdpSocket, pace_mbps: u64, sent_bytes: Arc<AtomicU64>, sent_packets: Arc<AtomicU64>) -> Result<Self> {
         let mut sender = PacedSender::new(sock, pace_mbps * 1_000_000, MAX_PAYLOAD);
         let (tx, rx) = sync_channel::<Vec<u8>>(4);
         let thread = std::thread::Builder::new().name("udp-send".into()).spawn(move || {
@@ -181,6 +232,7 @@ impl NetSender {
                 match sender.send_frame(&au) {
                     Ok(Some(st)) => {
                         sent_bytes.fetch_add(st.bytes as u64, Ordering::Relaxed);
+                        sent_packets.fetch_add(st.packets as u64, Ordering::Relaxed);
                     }
                     Ok(None) => warn!("frame of {} B too large to packetize; lower the bitrate", au.len()),
                     Err(e) if !warned => {
@@ -281,7 +333,8 @@ impl AudioPart {
     }
 }
 
-fn run(cfg: &CastConfig, stop: &AtomicBool, audio_on: &AtomicBool, stats: &Mutex<CastStats>) -> Result<EndReason> {
+fn run(cfg: &CastConfig, controls: &Controls, stats: &Mutex<CastStats>) -> Result<EndReason> {
+    let (stop, audio_on) = (&controls.stop, &controls.audio);
     if !sources::has_screen_recording_permission() {
         // Shows the system prompt the first time; capture start below then fails with a
         // clear message until the user allows NANOCast and restarts it.
@@ -295,7 +348,7 @@ fn run(cfg: &CastConfig, stop: &AtomicBool, audio_on: &AtomicBool, stats: &Mutex
     // cannot ask for a keyframe after a loss.
     let want_keyframe = Arc::new(AtomicBool::new(false));
     let ctrl_addr = SocketAddr::new(cfg.video_addr.ip(), cfg.ctrl_port);
-    let mut link = match ControlLink::open(ctrl_addr, &cfg.sender_name, want_keyframe.clone()) {
+    let mut link = match ControlLink::open(ctrl_addr, &cfg.sender_name, cfg.pin.as_deref(), want_keyframe.clone()) {
         Ok(link) => {
             info!("control channel connected to {ctrl_addr}");
             Some(link)
@@ -305,21 +358,38 @@ fn run(cfg: &CastConfig, stop: &AtomicBool, audio_on: &AtomicBool, stats: &Mutex
             None
         }
     };
-    // Give `caps` a moment so the picture size can respect the receiver's maximum.
+    // Give `caps` (or a PIN refusal) a moment so the picture size can respect the
+    // receiver's maximum.
     if let Some(l) = &link {
         let until = Instant::now() + Duration::from_millis(300);
-        while Instant::now() < until && l.report.lock().unwrap().max_size.is_none() {
+        while Instant::now() < until {
+            {
+                let r = l.report.lock().unwrap();
+                if r.codecs.is_some() || r.error.is_some() || !r.connected {
+                    break;
+                }
+            }
             if stop.load(Ordering::Relaxed) {
                 return Ok(EndReason::Stopped);
             }
             std::thread::sleep(Duration::from_millis(10));
         }
     }
-    let max = link
-        .as_ref()
-        .and_then(|l| l.report.lock().unwrap().max_size)
-        .map(|(w, h)| (w.min(MAX_CANVAS.0), h.min(MAX_CANVAS.1)))
-        .unwrap_or(MAX_CANVAS);
+    let report = link.as_ref().map(|l| l.report.lock().unwrap().clone()).unwrap_or_default();
+    if report.error.as_deref() == Some(ERR_BAD_PIN) {
+        return Ok(EndReason::PinRejected);
+    }
+    let max = report.max_size.map(|(w, h)| (w.min(MAX_CANVAS.0), h.min(MAX_CANVAS.1))).unwrap_or(MAX_CANVAS);
+    let codec_fallback = match cfg.codec {
+        VideoCodec::H264 => None,
+        VideoCodec::Hevc if VideoCodec::negotiate(VideoCodec::Hevc, report.codecs.as_deref()) == VideoCodec::H264 => {
+            Some(CodecFallback::ReceiverH264Only)
+        }
+        VideoCodec::Hevc => {
+            warn!("HEVC is not implemented on macOS yet; sending H.264");
+            Some(CodecFallback::NoEncoder)
+        }
+    };
 
     // Fixed encoder size: a display keeps its aspect (capped); a window is scaled into a
     // full TV frame so resizing it never needs a new stream.
@@ -331,7 +401,10 @@ fn run(cfg: &CastConfig, stop: &AtomicBool, audio_on: &AtomicBool, stats: &Mutex
         Source::Window(_) => (max.0 & !1, max.1 & !1),
     };
 
-    let enc_cfg = EncoderConfig {
+    let mut adapter = (cfg.adaptive && link.is_some()).then(|| Adaptive::new(cfg.bitrate_mbps, cfg.fps, Instant::now()));
+    // (stats count, packets, frames, keyframe requests, time) at the previous report.
+    let mut last_report = (0u64, 0u64, 0u64, 0usize, Instant::now());
+    let mut enc_cfg = EncoderConfig {
         width: canvas.0,
         height: canvas.1,
         fps: cfg.fps,
@@ -349,12 +422,16 @@ fn run(cfg: &CastConfig, stop: &AtomicBool, audio_on: &AtomicBool, stats: &Mutex
     {
         let mut s = stats.lock().unwrap();
         s.encoder = encoder.name.clone();
+        s.codec = VideoCodec::H264;
+        s.codec_fallback = codec_fallback;
         s.size = canvas;
+        (s.target_mbps, s.target_fps, s.adaptive) = (cfg.bitrate_mbps, cfg.fps, adapter.is_some());
     }
 
     let sent_bytes = Arc::new(AtomicU64::new(0));
+    let sent_packets = Arc::new(AtomicU64::new(0));
     let mut sink = Sink {
-        net: NetSender::start(sock, cfg.pace_mbps, sent_bytes)?,
+        net: NetSender::start(sock, cfg.pace_mbps, sent_bytes, sent_packets.clone())?,
         total: 0,
         keyframes: 0,
         frames: 0,
@@ -393,6 +470,7 @@ fn run(cfg: &CastConfig, stop: &AtomicBool, audio_on: &AtomicBool, stats: &Mutex
     let mut last_publish = Instant::now();
     let mut last_alive_check = Instant::now();
     let mut retried_normal = false;
+    let (mut paused, mut blank) = (false, false);
 
     let reason = loop {
         if stop.load(Ordering::Relaxed) {
@@ -401,7 +479,59 @@ fn run(cfg: &CastConfig, stop: &AtomicBool, audio_on: &AtomicBool, stats: &Mutex
         if capture.is_finished() {
             break EndReason::SourceClosed;
         }
-        if let Some(on) = audio.follow(audio_on.load(Ordering::Relaxed)) {
+        if link.as_ref().is_some_and(|l| l.report.lock().unwrap().error.as_deref() == Some(ERR_BAD_PIN)) {
+            break EndReason::PinRejected;
+        }
+        // Pause / blank: tell the TV, stop encoding and sound; IDR when the picture resumes.
+        let (want_pause, want_blank) = (controls.pause.load(Ordering::Relaxed), controls.blank.load(Ordering::Relaxed));
+        if want_pause != paused || want_blank != blank {
+            if let Some(l) = link.as_mut() {
+                if want_pause != paused {
+                    l.send(&Message::Pause { on: want_pause });
+                }
+                if want_blank != blank {
+                    l.send(&Message::Blank { on: want_blank });
+                }
+            }
+            if (paused || blank) && !(want_pause || want_blank) {
+                encoder.request_keyframe();
+            }
+            (paused, blank) = (want_pause, want_blank);
+        }
+        let held = paused || blank;
+        // Adaptive bitrate (bitrate only on macOS), at most one change per receiver report.
+        if let (Some(a), Some(l)) = (adapter.as_mut(), link.as_ref()) {
+            let (count, tv) = {
+                let r = l.report.lock().unwrap();
+                (r.stats_count, r.stats)
+            };
+            if let (true, Some(tv)) = (count != last_report.0, tv) {
+                let now = Instant::now();
+                let packets = sent_packets.load(Ordering::Relaxed);
+                let requests = l.keyframe_requests.load(Ordering::Relaxed);
+                let secs = now.duration_since(last_report.4).as_secs_f64().max(0.2);
+                let r = adapt::Report {
+                    lost: tv.lost,
+                    sent_packets: packets - last_report.1,
+                    sent_fps: (sink.total - last_report.2) as f64 / secs,
+                    keyframe_requests: (requests - last_report.3) as u32,
+                    tv_fps: tv.fps,
+                    decode_ms: tv.decode_ms,
+                };
+                last_report = (count, packets, sink.total, requests, now);
+                if let Some(next) = a.on_report(r, now) {
+                    info!("adaptive bitrate: {} Mbps ({:?})", next.mbps, a.reason());
+                    enc_cfg.bitrate_bps = next.mbps * 1_000_000;
+                    if !encoder.set_bitrate(enc_cfg.bitrate_bps) {
+                        drop(encoder);
+                        encoder = VtEncoder::open(&enc_cfg)?;
+                    }
+                    let mut s = stats.lock().unwrap();
+                    (s.target_mbps, s.adapt_reason, s.encoder) = (next.mbps, a.reason(), encoder.name.clone());
+                }
+            }
+        }
+        if let Some(on) = audio.follow(audio_on.load(Ordering::Relaxed) && !held) {
             if let Some(l) = link.as_mut() {
                 l.send(&Message::Audio { on });
             }
@@ -416,6 +546,7 @@ fn run(cfg: &CastConfig, stop: &AtomicBool, audio_on: &AtomicBool, stats: &Mutex
         }
 
         let step = match rx.recv_timeout(Duration::from_millis(5)) {
+            Ok(_) if held => encoder.poll_output(|f| sink.push(f)),
             Ok(frame) => {
                 // keyframe_request from the receiver (set by the control reader thread).
                 if want_keyframe.swap(false, Ordering::Relaxed) {
@@ -453,6 +584,7 @@ fn run(cfg: &CastConfig, stop: &AtomicBool, audio_on: &AtomicBool, stats: &Mutex
             s.frames_sent = sink.total;
             s.keyframes = sink.keyframes;
             s.frames_dropped = counters.dropped.load(Ordering::Relaxed) as u64 + sink.net.dropped + encoder.dropped();
+            (s.paused, s.blank) = (paused, blank);
             let audio_bytes = audio.counters.bytes.load(Ordering::Relaxed);
             s.audio_kbps = (audio_bytes - audio.last_bytes) as f64 * 8.0 / secs / 1e3;
             audio.last_bytes = audio_bytes;

@@ -9,8 +9,13 @@
 //!
 //! Usage:
 //!   nanocast-receiver [--name "Phong 12"] [--windowed] [--on-top] [--overlay] [--no-audio] [--no-mdns]
-//!                     [--port 48322] [--max 1920x1080] [--exit-after <sec>]
+//!                     [--port 48322] [--max 1920x1080] [--pin | --pin-code 1234] [--exit-after <sec>]
 //! Keys: O = stats overlay on/off, F / F11 = full screen on/off, Esc = quit.
+//!
+//! `--pin` asks senders for a random 4-digit code shown on screen (`--pin-code` picks it):
+//! TXT `pin=1`, `hello` without the code is refused, UDP only from the accepted sender.
+//! Pause / black screen from the sender: the last picture stays with a small pause sign,
+//! or the screen goes black. H.264 only (no HEVC decoder here; senders fall back).
 
 mod assembler;
 mod audio;
@@ -20,6 +25,7 @@ mod font;
 mod render;
 mod stats;
 
+use std::hash::{BuildHasher, Hasher};
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::Arc;
@@ -44,6 +50,8 @@ use crate::stats::{RateMeter, Rates, Stats};
 const IDLE_AFTER: Duration = Duration::from_secs(2);
 /// Kernel receive buffer for the video socket: a 1080p keyframe is ~300 KB.
 const RECV_BUFFER: usize = 4 * 1024 * 1024;
+/// How often the main loop looks at pause / blank from the control channel.
+const FOLLOW_EVERY: Duration = Duration::from_millis(50);
 
 struct Args {
     name: String,
@@ -55,7 +63,16 @@ struct Args {
     port: u16,
     max_w: u32,
     max_h: u32,
+    /// 4-digit code senders must give (`--pin` / `--pin-code`).
+    pin: Option<String>,
     exit_after: Option<f64>,
+}
+
+/// A 4-digit code from the OS-seeded hasher (no RNG crate needed).
+fn random_pin() -> String {
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+    format!("{:04}", h.finish() % 10_000)
 }
 
 fn parse_args() -> Result<Args> {
@@ -69,6 +86,7 @@ fn parse_args() -> Result<Args> {
         port: VIDEO_PORT,
         max_w: 1920,
         max_h: 1080,
+        pin: None,
         exit_after: None,
     };
     let mut it = std::env::args().skip(1);
@@ -88,10 +106,19 @@ fn parse_args() -> Result<Args> {
                 (a.max_w, a.max_h) = (w.parse()?, h.parse()?);
             }
             "--exit-after" => a.exit_after = Some(val()?.parse()?),
+            "--pin" => a.pin = Some(random_pin()),
+            "--pin-code" => {
+                let v = val()?;
+                if v.len() != 4 || !v.bytes().all(|b| b.is_ascii_digit()) {
+                    bail!("--pin-code needs 4 digits");
+                }
+                a.pin = Some(v);
+            }
             "-h" | "--help" => {
                 println!(
                     "nanocast-receiver [--name NAME] [--windowed] [--on-top] [--overlay] [--no-audio] [--no-mdns] \
-                     [--port 48322] [--max 1920x1080] [--exit-after SEC]\nKeys: O overlay, F/F11 full screen, Esc quit"
+                     [--port 48322] [--max 1920x1080] [--pin | --pin-code 1234] [--exit-after SEC]\n\
+                     Keys: O overlay, F/F11 full screen, Esc quit"
                 );
                 std::process::exit(0);
             }
@@ -133,13 +160,15 @@ fn video_socket(port: u16) -> Result<UdpSocket> {
     Ok(s)
 }
 
-/// Network thread: datagrams -> frames -> decoder queue.
+/// Network thread: datagrams -> frames -> decoder queue. With a 4-digit code, datagrams from
+/// any address but the accepted sender's are dropped here.
 fn run_net(sock: UdpSocket, queue: Arc<FrameQueue>, stats: Arc<Stats>, control: ControlServer) {
     let mut asm = Assembler::new();
     let mut buf = vec![0u8; 65536];
     loop {
-        let n = match sock.recv(&mut buf) {
-            Ok(n) => n,
+        let n = match sock.recv_from(&mut buf) {
+            Ok((n, from)) if control.allows(from.ip()) => n,
+            Ok(_) => continue,
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
             // Windows reports ICMP port-unreachable of an earlier send as an error on recv.
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
@@ -181,6 +210,8 @@ struct App {
     started: Instant,
     first_picture: Option<Instant>,
     error: Option<anyhow::Error>,
+    /// (paused, blank) last applied from the control channel.
+    held: (bool, bool),
 }
 
 impl App {
@@ -195,7 +226,20 @@ impl App {
         } else {
             format!("CTRL TCP {CONTROL_PORT} WAITING (UDP ONLY)")
         };
-        vec![
+        let mut lines = Vec::new();
+        if session.paused {
+            lines.push("‖ TAM DUNG / PAUSED".into());
+        }
+        if session.blank {
+            lines.push("MAN HINH DEN / BLACK SCREEN".into());
+        }
+        if let Some(codec) = &session.unsupported_codec {
+            lines.push(format!("{codec} KHONG HO TRO / NOT SUPPORTED: H.264 ONLY"));
+        }
+        if let Some(pin) = &self.args.pin {
+            lines.push(format!("MA / CODE {pin}  (REFUSED {})", session.rejected));
+        }
+        lines.extend([
             format!(
                 "FPS {:5.1} SHOWN {:5.1} | LOST {:4} | DECODE {:5.2} MS | {:5.1} MBPS",
                 r.fps_decoded, r.fps_presented, r.lost, r.decode_ms, r.mbps
@@ -213,7 +257,8 @@ impl App {
             ),
             ctrl,
             "O OVERLAY  F FULL SCREEN  ESC QUIT".into(),
-        ]
+        ]);
+        lines
     }
 
     fn idle_lines(&self) -> Vec<String> {
@@ -222,6 +267,12 @@ impl App {
             lines.push("NO NETWORK".into());
         }
         lines.extend(self.ips.iter().map(|ip| format!("IP {ip}")));
+        if let Some(pin) = &self.args.pin {
+            lines.extend([String::new(), format!("MA / CODE  {pin}")]);
+        }
+        if let Some(codec) = self.control.session().unsupported_codec {
+            lines.extend([String::new(), format!("{codec}: KHONG HO TRO / NOT SUPPORTED"), "CHON H.264 TREN MAY TINH".into()]);
+        }
         lines.extend([String::new(), "DANG CHO MAY TINH KET NOI...".into(), "WAITING FOR A SENDER".into()]);
         lines
     }
@@ -248,13 +299,23 @@ impl App {
         } else if self.overlay_on {
             let img = fit(self.overlay_lines(), size.height / 540, 150);
             self.renderer.as_mut().unwrap().set_overlay(Some(&img));
+        } else if self.held.0 && !self.held.1 {
+            // Small pause sign on the frozen picture.
+            let img = fit(vec!["‖".into()], size.height / 180, 120);
+            self.renderer.as_mut().unwrap().set_overlay(Some(&img));
         } else {
             self.renderer.as_mut().unwrap().set_overlay(None);
         }
     }
 
     fn draw(&mut self) {
-        let placement = if self.idle { Placement::Center } else { Placement::TopLeft };
+        let placement = if self.idle {
+            Placement::Center
+        } else if !self.overlay_on && self.held.0 && !self.held.1 {
+            Placement::TopRight
+        } else {
+            Placement::TopLeft
+        };
         if let Some(r) = self.renderer.as_mut() {
             r.render(placement);
         }
@@ -269,7 +330,10 @@ impl App {
         self.rates = self.meter.sample(&self.stats);
         let session = self.control.session();
         let since = self.last_picture.map(|t| now - t);
+        // Paused / black: no pictures on purpose, so not idle while the sender is there.
+        let held = session.connected && (session.paused || session.blank);
         let idle = match since {
+            _ if held => false,
             None => true,
             Some(d) => d > IDLE_AFTER || (session.stopped && d > Duration::from_millis(100)),
         };
@@ -332,6 +396,9 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _: UserEvent) {
         self.picture_pending.store(false, Relaxed);
         let Some(pic) = self.latest.lock().unwrap().take() else { return };
+        if self.held.0 || self.held.1 {
+            return; // paused (keep the last picture) / black: frames still in flight are not shown
+        }
         let Some(r) = self.renderer.as_mut() else { return };
         r.upload(&pic);
         let now = Instant::now();
@@ -379,12 +446,38 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.follow_session();
         self.tick(event_loop);
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_tick));
+        let wake = self.next_tick.min(Instant::now() + FOLLOW_EVERY);
+        event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
     }
 }
 
 impl App {
+    /// Applies pause / black screen from the control channel within ~50 ms.
+    fn follow_session(&mut self) {
+        let s = self.control.session();
+        let held = if s.connected { (s.paused, s.blank) } else { (false, false) };
+        if held == self.held {
+            return;
+        }
+        log::info!("paused {} blank {}", held.0, held.1);
+        if held.1 {
+            if let Some(r) = self.renderer.as_mut() {
+                r.clear_video();
+            }
+        }
+        if !held.0 && !held.1 {
+            // Resumed: count from now so the idle screen does not flash before the next picture.
+            self.last_picture = Some(Instant::now());
+        }
+        self.held = held;
+        if held.0 || held.1 {
+            self.idle = false;
+        }
+        self.refresh_overlay();
+        self.draw();
+    }
     fn toggle_fullscreen(&mut self) {
         if let Some(w) = &self.window {
             let full = w.fullscreen().is_none();
@@ -403,15 +496,19 @@ fn main() -> Result<()> {
     log::info!("NANOCast receiver \"{}\" on {:?}", args.name, ips);
 
     let sock = video_socket(args.port)?;
+    if let Some(pin) = &args.pin {
+        log::info!("4-digit code {pin}: senders must enter it");
+    }
     let control = ControlServer::start(
         SocketAddr::from((Ipv4Addr::UNSPECIFIED, CONTROL_PORT)),
         &args.name,
         args.max_w,
         args.max_h,
+        args.pin.clone(),
         stats.clone(),
     )?;
     let _advertiser = if args.mdns {
-        match Advertiser::new(&args.name, args.port, args.max_w, args.max_h) {
+        match Advertiser::new(&args.name, args.port, args.max_w, args.max_h, args.pin.is_some()) {
             Ok(a) => {
                 log::info!("advertising _nanocast._udp as \"{}\"", args.name);
                 Some(a)
@@ -456,9 +553,9 @@ fn main() -> Result<()> {
         std::thread::Builder::new().name("net".into()).spawn(move || run_net(sock, queue, stats, control))?;
     }
     if args.audio {
-        let stats = stats.clone();
+        let (stats, control) = (stats.clone(), control.clone());
         std::thread::Builder::new().name("audio".into()).spawn(move || {
-            if let Err(e) = audio::run(SocketAddr::from((Ipv4Addr::UNSPECIFIED, AUDIO_PORT)), stats) {
+            if let Err(e) = audio::run(SocketAddr::from((Ipv4Addr::UNSPECIFIED, AUDIO_PORT)), stats, control) {
                 log::error!("audio: {e:#}");
             }
         })?;
@@ -485,6 +582,7 @@ fn main() -> Result<()> {
         started: now,
         first_picture: None,
         error: None,
+        held: (false, false),
     };
     event_loop.run_app(&mut app)?;
     queue.close();

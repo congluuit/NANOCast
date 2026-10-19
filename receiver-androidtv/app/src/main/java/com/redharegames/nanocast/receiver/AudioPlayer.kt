@@ -35,6 +35,8 @@ import java.util.concurrent.atomic.AtomicLong
  */
 class AudioPlayer {
     @Volatile private var enabled = true
+    /** Source filter (4-digit code on: only the accepted sender); set before [start]. */
+    @Volatile var allow: (java.net.InetAddress) -> Boolean = { true }
     @Volatile private var flushRequested = false
     @Volatile private var socket: DatagramSocket? = null
     private var thread: Thread? = null
@@ -150,7 +152,7 @@ class AudioPlayer {
                 }
                 val len = packet.length
                 if (len < Protocol.AUDIO_HEADER_LEN || u16(buf, 0) != Protocol.AUDIO_MAGIC) continue
-                if (!enabled) continue
+                if (!enabled || !allow(packet.address)) continue
                 lastPacketNs = System.nanoTime()
                 val seq = u32(buf, 2)
                 if (expectSeq >= 0 && seq != expectSeq) {

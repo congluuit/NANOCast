@@ -9,6 +9,7 @@
 //!   spike-win [--window <title substring>] [--monitor <index>] [--seconds 10]
 //!             [--fps 60] [--bitrate-mbps 20] [--encoder <index>] [--out out.h264] [--list]
 //!             [--to <ip[:port]>] [--discover] [--pace-mbps 80] [--keyframe-every <sec>]
+//!             [--codec h264|hevc]
 
 use std::fs::File;
 use std::io::Write;
@@ -21,7 +22,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context as _, Result};
 use nanocast_core::control::Message;
 use nanocast_core::discovery;
-use nanocast_core::protocol::{PacedSender, CONTROL_PORT, MAX_PAYLOAD, VIDEO_PORT};
+use nanocast_core::protocol::{PacedSender, VideoCodec, CONTROL_PORT, MAX_PAYLOAD, VIDEO_PORT};
 use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
@@ -126,6 +127,7 @@ struct Args {
     discover: bool,
     pace_mbps: u64,
     keyframe_every: Option<f64>,
+    codec: VideoCodec,
 }
 
 fn parse_args() -> Args {
@@ -142,6 +144,7 @@ fn parse_args() -> Args {
         discover: false,
         pace_mbps: 80,
         keyframe_every: None,
+        codec: VideoCodec::H264,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -162,6 +165,7 @@ fn parse_args() -> Args {
             "--discover" => a.discover = true,
             "--pace-mbps" => a.pace_mbps = val().parse().unwrap(),
             "--keyframe-every" => a.keyframe_every = Some(val().parse().unwrap()),
+            "--codec" => a.codec = VideoCodec::parse(&val()).expect("--codec h264|hevc"),
             other => panic!("unknown arg {other}"),
         }
     }
@@ -199,8 +203,8 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let _rt = MfRuntime::init()?;
 
-    let encoders = mf_encoder::list_hw_h264_encoders()?;
-    println!("Hardware H.264 encoders (Media Foundation):");
+    let encoders = mf_encoder::list_hw_encoders(args.codec)?;
+    println!("Hardware {} encoders (Media Foundation):", args.codec.as_str());
     for (i, (name, _)) in encoders.iter().enumerate() {
         println!("  [{i}] {name}");
     }
@@ -369,7 +373,7 @@ fn main() -> Result<()> {
 
         if encoder.is_none() {
             let cfg = EncoderConfig {
-                codec: nanocast_core::protocol::VideoCodec::H264,
+                codec: args.codec,
                 width: msg.width,
                 height: msg.height,
                 fps: args.fps,
@@ -386,7 +390,7 @@ fn main() -> Result<()> {
             enc_dims = (msg.width, msg.height);
             encoder = Some(enc);
             if let Some(link) = control_link.as_mut() {
-                link.send(&Message::Start { w: msg.width, h: msg.height, fps: args.fps, codec: "h264".into(), audio: false });
+                link.send(&Message::Start { w: msg.width, h: msg.height, fps: args.fps, codec: args.codec.as_str().into(), audio: false });
             }
         }
         if (msg.width, msg.height) != enc_dims {

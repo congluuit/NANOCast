@@ -11,6 +11,7 @@ import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.IOException
 import java.io.InputStreamReader
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -24,30 +25,46 @@ import java.util.concurrent.atomic.AtomicLong
  * Receiver side of the control channel (PLAN.md §4, mirrors `crates/core/src/control.rs`):
  * TCP [Protocol.CONTROL_PORT], one JSON object per line, message type in field "t".
  *
- *   sender → receiver: hello {ver, name} | start {w, h, fps, codec, audio} | audio {on} | stop
- *   receiver → sender: caps {ver, name, max_w, max_h, codecs, low_latency}
+ *   sender → receiver: hello {ver, name, pin?} | start {w, h, fps, codec, audio} | audio {on}
+ *                    | pause {on} | blank {on} | stop
+ *   receiver → sender: caps {ver, name, max_w, max_h, codecs, low_latency} | error {code, message}
  *                    | keyframe_request {reason} | stats {fps, lost, decode_ms}
  *
- * One sender at a time: a new connection replaces the previous one (the PC may have gone
- * away without closing). `stats` goes out every second (`lost` = packets lost since the
- * previous report); `keyframe_request` at most once per 500 ms. Every write runs on one
- * executor thread, so the network and decoder threads never block on TCP.
+ * One sender at a time: a sender whose `hello` is accepted replaces the previous one (the
+ * PC may have gone away without closing). `stats` goes out every second (`lost` = packets
+ * lost since the previous report); `keyframe_request` at most once per 500 ms. Every write
+ * to the current sender runs on one executor thread, so the network and decoder threads
+ * never block on TCP.
+ *
+ * With a 4-digit code ([pin] not null), a `hello` without the right `pin` gets
+ * `error {code: "bad_pin"}` and is closed without disturbing the current sender, and
+ * [allows] only lets UDP through from the accepted sender's address.
  */
 class ControlServer(
     private val stats: Stats,
     private val deviceName: () -> String,
     /** `audio {on}`, `start {audio}`; `stop` and a lost sender count as off. */
     private val onAudio: (Boolean) -> Unit = {},
+    /** The code senders must give, or null when the option is off. */
+    private val pin: () -> String? = { null },
+    /** `pause {on}` / `blank {on}`; `start`, `stop` and a lost sender reset both to false. */
+    private val onPause: (Boolean) -> Unit = {},
+    private val onBlank: (Boolean) -> Unit = {},
+    /** `start.codec` ("h264" / "hevc"). */
+    private val onCodec: (String) -> Unit = {},
 ) {
     private val lock = Any()
     private var server: ServerSocket? = null
     private var client: Socket? = null
+    @Volatile private var authorized: InetAddress? = null
     private var acceptThread: Thread? = null
     @Volatile private var tx: ScheduledExecutorService? = null
     @Volatile private var connected = false
 
     private val lastKeyframeNs = AtomicLong(0)
     val keyframeRequests = AtomicLong()
+    /** `hello`s refused for a missing / wrong code. */
+    val rejected = AtomicLong()
 
     @Volatile var status = "ctrl: off"
         private set
@@ -76,15 +93,24 @@ class ControlServer(
         tx = null
         server?.close()
         server = null
-        synchronized(lock) {
-            closeQuietly(client)
-            client = null
-            connected = false
-        }
+        disconnect()
         acceptThread?.join(500)
         acceptThread = null
         status = "ctrl: off"
     }
+
+    /** Closes the current sender (e.g. the code option changed: it must say hello again). */
+    fun disconnect() {
+        synchronized(lock) {
+            closeQuietly(client)
+            client = null
+            connected = false
+            authorized = null
+        }
+    }
+
+    /** Whether UDP from [addr] may be played: anyone without a code, else only the accepted sender. */
+    fun allows(addr: InetAddress?): Boolean = pin() == null || (addr != null && addr == authorized)
 
     /** Asks the sender for an IDR. Cheap and thread-safe; rate-limited to one per 500 ms. */
     fun requestKeyframe(reason: String) {
@@ -107,21 +133,29 @@ class ControlServer(
             }
             sock.tcpNoDelay = true
             sock.keepAlive = true
-            synchronized(lock) {
-                closeQuietly(client) // its reader thread ends on the closed socket
-                client = sock
-                connected = true
-            }
-            lastKeyframeNs.set(0)
+            // Becomes the current sender only after an accepted hello (see readLoop).
             Thread({ readLoop(sock) }, "nanocast-ctrl-rx").start()
         }
     }
 
+    /** Makes [sock] the current sender; the previous one is closed (its reader ends). */
+    private fun adopt(sock: Socket) {
+        synchronized(lock) {
+            if (client !== sock) closeQuietly(client)
+            client = sock
+            connected = true
+            authorized = sock.inetAddress
+        }
+        lastKeyframeNs.set(0)
+    }
+
+    private fun isCurrent(sock: Socket) = synchronized(lock) { client === sock }
+
     private fun readLoop(sock: Socket) {
         val peer = sock.inetAddress?.hostAddress ?: "?"
-        Log.i(TAG, "sender connected from $peer")
-        status = "ctrl: $peer connected"
+        Log.i(TAG, "connection from $peer")
         var sender = peer
+        var adopted = false
         try {
             val reader = BufferedReader(InputStreamReader(sock.getInputStream(), Charsets.UTF_8))
             while (true) {
@@ -133,18 +167,41 @@ class ControlServer(
                     Log.w(TAG, "bad control line: $line")
                     continue
                 }
-                when (val t = msg.optString("t")) {
-                    "hello" -> {
-                        sender = msg.optString("name").ifEmpty { peer }
-                        Log.i(TAG, "hello from $sender (v${msg.optString("ver")})")
-                        status = "ctrl: $sender ($peer)"
-                        send(caps())
+                val t = msg.optString("t")
+                if (t == "hello") {
+                    sender = msg.optString("name").ifEmpty { peer }
+                    val want = pin()
+                    val given = if (msg.has("pin") && !msg.isNull("pin")) msg.optString("pin") else null
+                    if (want != null && given != want) {
+                        rejected.incrementAndGet()
+                        Log.w(TAG, "hello from $sender ($peer) refused: ${if (given == null) "no code" else "wrong code"}")
+                        val err = JSONObject().put("t", "error").put("code", Protocol.ERR_BAD_PIN)
+                            .put("message", "4-digit code required")
+                        try {
+                            sock.getOutputStream().write((err.toString() + "\n").toByteArray(Charsets.UTF_8))
+                        } catch (_: IOException) {
+                        }
+                        return // finally closes it; the current sender is untouched
                     }
+                    Log.i(TAG, "hello from $sender (v${msg.optString("ver")})")
+                    adopt(sock)
+                    adopted = true
+                    status = "ctrl: $sender ($peer)"
+                    send(caps())
+                    continue
+                }
+                // Nothing but hello counts before this connection is the accepted sender.
+                if (!adopted || !isCurrent(sock)) continue
+                when (t) {
                     "start" -> {
+                        val codec = msg.optString("codec").ifEmpty { Protocol.CODEC_H264 }
                         val desc = "${msg.optInt("w")}x${msg.optInt("h")}@${msg.optInt("fps")} " +
-                            "${msg.optString("codec")} audio ${if (msg.optBoolean("audio")) "on" else "off"}"
+                            "$codec audio ${if (msg.optBoolean("audio")) "on" else "off"}"
                         Log.i(TAG, "start: $desc")
                         status = "ctrl: $sender ($peer) $desc"
+                        onCodec(codec)
+                        onPause(false)
+                        onBlank(false)
                         onAudio(msg.optBoolean("audio"))
                     }
                     "audio" -> {
@@ -152,9 +209,21 @@ class ControlServer(
                         Log.i(TAG, "audio ${if (on) "on" else "off"}")
                         onAudio(on)
                     }
+                    "pause" -> {
+                        val on = msg.optBoolean("on")
+                        Log.i(TAG, "pause ${if (on) "on" else "off"}")
+                        onPause(on)
+                    }
+                    "blank" -> {
+                        val on = msg.optBoolean("on")
+                        Log.i(TAG, "blank ${if (on) "on" else "off"}")
+                        onBlank(on)
+                    }
                     "stop" -> {
                         Log.i(TAG, "stop from $sender")
                         onAudio(false)
+                        onPause(false)
+                        onBlank(false)
                         status = "ctrl: $sender ($peer) stopped"
                     }
                     else -> Log.w(TAG, "unknown control message type '$t'")
@@ -168,11 +237,14 @@ class ControlServer(
                 if (client === sock) {
                     client = null
                     connected = false
+                    authorized = null
                     onAudio(false)
+                    onPause(false)
+                    onBlank(false)
                     status = "ctrl: tcp ${Protocol.CONTROL_PORT} waiting (last: $sender)"
                 }
             }
-            Log.i(TAG, "sender $sender disconnected")
+            if (adopted) Log.i(TAG, "sender $sender disconnected")
         }
     }
 
@@ -182,7 +254,7 @@ class ControlServer(
         .put("name", deviceName())
         .put("max_w", Protocol.WIDTH)
         .put("max_h", Protocol.HEIGHT)
-        .put("codecs", JSONArray().put("h264"))
+        .put("codecs", JSONArray(VideoDecoder.supportedCodecs))
         .put("low_latency", lowLatencyDecoder)
 
     /** Whether the decoder MediaCodec would pick for our stream advertises FEATURE_LowLatency. */

@@ -6,6 +6,7 @@ pub mod adapt;
 pub mod au;
 pub mod audio;
 pub mod control;
+pub mod control_link;
 pub mod discovery;
 pub mod protocol;
 

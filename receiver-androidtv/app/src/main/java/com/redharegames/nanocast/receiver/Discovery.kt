@@ -7,10 +7,17 @@ import android.os.Build
 import android.provider.Settings
 import android.util.Log
 
-/** Advertises this receiver as `_nanocast._udp.local` so the PC app finds it without typing an IP. */
+/**
+ * Advertises this receiver as `_nanocast._udp.local` so the PC app finds it without typing an IP.
+ * TXT `pin=1` when the 4-digit code is on (the PC then asks for it), `codec` lists the
+ * decoders (`h264` or `h264,hevc`).
+ */
 class Discovery(private val context: Context) {
     private val nsd = context.getSystemService(NsdManager::class.java)
     private var listener: NsdManager.RegistrationListener? = null
+    @Volatile private var pin = false
+    /** Set while waiting for the old registration to go away before registering again. */
+    @Volatile private var reRegister = false
 
     /** Name actually registered (NSD may append " (2)" on conflicts), for the overlay. */
     @Volatile var registeredName: String? = null
@@ -23,6 +30,15 @@ class Discovery(private val context: Context) {
             ?.takeIf { it.isNotBlank() }
             ?: Build.MODEL
 
+    /** Re-advertises with the new TXT `pin` (unregister, then register once NSD confirms). */
+    fun setPin(on: Boolean) {
+        if (on == pin) return
+        pin = on
+        if (listener == null) return
+        reRegister = true
+        drop()
+    }
+
     fun register() {
         if (listener != null) return
         val info = NsdServiceInfo().apply {
@@ -31,7 +47,8 @@ class Discovery(private val context: Context) {
             port = Protocol.VIDEO_PORT
             setAttribute("w", Protocol.WIDTH.toString())
             setAttribute("h", Protocol.HEIGHT.toString())
-            setAttribute("codec", "h264")
+            setAttribute("codec", VideoDecoder.supportedCodecs.joinToString(","))
+            setAttribute("pin", if (pin) "1" else "0")
             setAttribute("ver", Protocol.VERSION)
             setAttribute("ctrl", Protocol.CONTROL_PORT.toString())
         }
@@ -50,6 +67,10 @@ class Discovery(private val context: Context) {
 
             override fun onServiceUnregistered(info: NsdServiceInfo) {
                 Log.i(TAG, "unregistered ${info.serviceName}")
+                if (reRegister) {
+                    reRegister = false
+                    register()
+                }
             }
 
             override fun onUnregistrationFailed(info: NsdServiceInfo, errorCode: Int) {
@@ -61,6 +82,11 @@ class Discovery(private val context: Context) {
     }
 
     fun unregister() {
+        reRegister = false
+        drop()
+    }
+
+    private fun drop() {
         val l = listener ?: return
         listener = null
         registeredName = null

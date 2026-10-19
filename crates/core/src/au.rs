@@ -1,4 +1,4 @@
-//! H.264 Annex B helpers: locate NAL units, split a byte stream into access units.
+//! H.264 / HEVC Annex B helpers: locate NAL units, split a byte stream into access units.
 
 /// Byte offsets of every NAL unit start code: (start code begin, NAL header index).
 pub fn nal_starts(data: &[u8]) -> Vec<(usize, usize)> {
@@ -56,6 +56,52 @@ pub fn is_keyframe(au: &[u8]) -> bool {
     nal_starts(au).iter().any(|&(_, h)| au.get(h).is_some_and(|b| b & 0x1F == 5))
 }
 
+/// HEVC NAL unit type (H.265 7.3.1.2: 6 bits after the forbidden bit).
+fn hevc_type(h: u8) -> u8 {
+    (h >> 1) & 0x3F
+}
+
+/// HEVC version of `split_access_units`: a new AU begins at an AUD (35), at VPS/SPS/PPS/
+/// prefix SEI (32..=34, 39) following a slice, or at a slice (VCL types 0..=31) with
+/// first_slice_segment_in_pic_flag set following a slice (H.265 7.4.2.4.4, simplified).
+pub fn split_access_units_hevc(data: &[u8]) -> Vec<&[u8]> {
+    let starts = nal_starts(data);
+    let mut aus = Vec::new();
+    let mut au_begin: Option<usize> = None;
+    let mut au_has_slice = false;
+    for &(begin, hdr) in &starts {
+        let Some(&h) = data.get(hdr) else { break };
+        let nal_type = hevc_type(h);
+        let is_slice = nal_type <= 31;
+        // The slice header starts after the 2-byte NAL header.
+        let first_slice = is_slice && data.get(hdr + 2).is_some_and(|b| b & 0x80 != 0);
+        let starts_new = match nal_type {
+            35 => true,
+            32..=34 | 39 => au_has_slice,
+            0..=31 => au_has_slice && first_slice,
+            _ => false,
+        };
+        if starts_new {
+            if let Some(b) = au_begin {
+                aus.push(&data[b..begin]);
+            }
+            au_begin = Some(begin);
+            au_has_slice = false;
+        }
+        au_begin.get_or_insert(begin);
+        au_has_slice |= is_slice;
+    }
+    if let Some(b) = au_begin {
+        aus.push(&data[b..]);
+    }
+    aus
+}
+
+/// True if the HEVC access unit contains an IRAP picture (BLA / IDR / CRA, types 16..=21).
+pub fn is_keyframe_hevc(au: &[u8]) -> bool {
+    nal_starts(au).iter().any(|&(_, h)| au.get(h).is_some_and(|&b| (16..=21).contains(&hevc_type(b))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,6 +125,27 @@ mod tests {
         assert_eq!(aus[0].len(), 6 + 7 + 6 + 6 + 6);
         assert_eq!(aus[1], &[0, 0, 0, 1, 0x41, 0x9A, 0x03]);
         assert!(!is_keyframe(aus[2]));
+        assert_eq!(aus.iter().map(|a| a.len()).sum::<usize>(), stream.len());
+    }
+
+    #[test]
+    fn splits_hevc() {
+        // NAL header byte 0 = type << 1; byte 1 = layer/tid (0x01).
+        let stream: Vec<u8> = [
+            &[0, 0, 0, 1, 32 << 1, 0x01, 0x0C][..], // VPS
+            &[0, 0, 0, 1, 33 << 1, 0x01, 0x01][..], // SPS
+            &[0, 0, 0, 1, 34 << 1, 0x01, 0xC1][..], // PPS
+            &[0, 0, 1, 19 << 1, 0x01, 0xAF][..],    // IDR_W_RADL, first slice
+            &[0, 0, 1, 19 << 1, 0x01, 0x40][..],    // IDR, second slice segment
+            &[0, 0, 0, 1, 1 << 1, 0x01, 0x80][..],  // TRAIL_R, first slice -> new AU
+            &[0, 0, 0, 1, 35 << 1, 0x01, 0x50][..], // AUD -> new AU
+            &[0, 0, 0, 1, 1 << 1, 0x01, 0x80][..],
+        ]
+        .concat();
+        let aus = split_access_units_hevc(&stream);
+        assert_eq!(aus.len(), 3);
+        assert!(is_keyframe_hevc(aus[0]) && !is_keyframe_hevc(aus[1]) && !is_keyframe_hevc(aus[2]));
+        assert_eq!(aus[0].len(), 7 * 3 + 6 * 2);
         assert_eq!(aus.iter().map(|a| a.len()).sum::<usize>(), stream.len());
     }
 }

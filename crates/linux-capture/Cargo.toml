@@ -11,7 +11,9 @@ description = "NANOCast Linux sender pipeline: PipeWire (xdg-desktop-portal) or 
 [features]
 default = ["pipewire", "ffmpeg", "openh264", "pulse"]
 # xdg-desktop-portal ScreenCast + PipeWire video (Wayland, also X11) and PipeWire system sound.
-pipewire = ["dep:pipewire", "dep:ashpd", "dep:pollster"]
+pipewire = ["portal", "dep:pipewire"]
+# The portal D-Bus half alone (pure Rust); only useful together with `pipewire`.
+portal = ["dep:ashpd", "dep:pollster"]
 # H.264 through the system FFmpeg (libavcodec): h264_vaapi, h264_nvenc, h264_v4l2m2m, libx264.
 ffmpeg = ["dep:ffmpeg-sys-next"]
 # Software H.264 built from source (BSD), used when FFmpeg has no usable encoder.
@@ -29,8 +31,8 @@ rayon = "1"
 # platform-neutral helpers (convert, annexb).
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
-# X11 capture (MIT-SHM, XFixes cursor) and source listing (RandR, EWMH). Pure Rust.
-x11rb = { version = "0.13", features = ["shm", "randr", "xfixes"] }
+# X11 capture (MIT-SHM, Composite, XFixes cursor) and source listing (RandR, EWMH). Pure Rust.
+x11rb = { version = "0.13", features = ["shm", "randr", "xfixes", "composite"] }
 # xdg-desktop-portal over D-Bus (pure Rust, zbus on async-io so no tokio runtime is needed).
 ashpd = { version = "0.12", default-features = false, features = ["async-std"], optional = true }
 pollster = { version = "0.4", optional = true }

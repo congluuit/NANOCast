@@ -306,3 +306,69 @@ Vấn đề gặp:
 - Decoder phần cứng (chưa làm: ffmpeg-next / Media Foundation decoder / VA-API), OpenH264 có NASM, máy yếu thật (PC cũ, mini PC), Raspberry Pi / Linux (hướng dẫn trong README chưa chạy thử).
 - TV/máy chiếu thật qua HDMI, LAN/Wi-Fi thật, PC khác thấy receiver qua mDNS, glass-to-glass.
 - Nghe âm thanh thật từ `nanocast.exe` (bật Âm thanh) và lệch hình/tiếng; thiết bị phát không phải 48 kHz (đi qua `Resampler`).
+
+## 2026-10-19 — Phase 2: bitrate thích nghi, tạm dừng / màn hình đen, mã 4 số, HEVC
+
+Máy dev như các mục trên (i9 + iGPU Intel + NVIDIA Optimus), emulator `NANOCast-test-API35` (x86_64, `c2.goldfish.*`). Giao thức: PLAN.md §4 (*pause/blank/error*, *Mã 4 số*, *Codec*, *Bitrate thích nghi*).
+
+Công cụ thử:
+- `cargo run -p nanocast-core --example ctrl_probe -- 127.0.0.1:48323 [--pin 1234] [--codec hevc] "start; sleep 6; pause on; sleep 6; pause off; blank on; sleep 6; blank off; stop"`: gửi tay control, in mọi message receiver trả về.
+- `cast_toggle` (example `nanocast-win`): thêm `--toggle audio|pause|blank`, `--codec`, `--pin`, `--bitrate`, `--fixed`; in thêm codec, codec fallback, bitrate/fps mục tiêu và lý do.
+- `spike-win --codec hevc --out x.h265` ghi HEVC; `spike-send x.h265` tách AU theo HEVC (đuôi `.h265`/`.hevc`).
+- Emulator: video bằng `spike-send` build cho `x86_64-linux-android` chạy trong máy ảo tới 127.0.0.1, control qua `adb forward tcp:48323 tcp:48323` (kết nối đến từ 127.0.0.1 nên lọc UDP theo IP vẫn khớp). Nhớ `adb forward --remove-all` trước khi thử receiver trên PC, nếu không cổng 48323 trên PC đi thẳng vào emulator.
+
+### Bitrate thích nghi (sender thật → receiver giả báo mất 3 % trong 9 s đầu)
+
+`cast_toggle --bitrate 30`, receiver giả (Python) nhận UDP và gửi `stats {lost = 3 % số gói nhận}`:
+
+| t (s) | Mục tiêu | Thực đo | Cách đổi |
+|---|---|---|---|
+| 0–2 | 30 Mbps @60 | 29,9 Mbps 60 fps | — |
+| 2 | 20 @60 (mất 2,9 %) | vẫn 29,9 | `MeanBitRate` lúc chạy: QSV trả OK nhưng **không áp dụng** (thử cả ép IDR: không đổi) |
+| 3,5 | 20 @60 | 15–20 | phát hiện sau 1,5 s (> 125 % mục tiêu) → mở lại encoder; từ đó mọi lần đổi đều mở lại |
+| 4 | 15 @60 | 15,0 | mở lại encoder |
+| 6 | 10 @30 | 9,8–10,4 Mbps, 29,5–31 fps | mở lại encoder (đổi fps) |
+| 9–19 | (hết mất gói) | 10 @30 | chờ 10 s sạch |
+| 19 | 15 @60 (mạng ổn định lại) | 14,8–15,3 | mở lại encoder |
+| 29 | 20 @60 | 19,8–19,9 | mở lại encoder |
+
+Mỗi lần mở lại encoder: khoảng 0,5 s bitrate thấp (khung đầu IDR), không lỗi, không rớt kết nối. Logic thuần (`nanocast_core::adapt`) có 3 test (bậc xuống/lên, burst keyframe_request, decoder chậm, trần lẻ 25 Mbps, sàn 10 Mbps).
+
+### Tạm dừng / màn hình đen
+
+| Thử | Kết quả |
+|---|---|
+| Emulator, `ctrl_probe` + `spike-send` (sender giả vẫn gửi hình) | `pause on`: hình đứng yên (decoder vẫn chạy nhưng không render), dấu ⏸ góc trên phải; `pause off`: chạy tiếp. `blank on`: đen toàn màn hình (đè cả overlay số liệu); `blank off`: hình trở lại ở keyframe kế tiếp |
+| `cast_toggle --toggle pause --every 4` → `nanocast-receiver` (PC) | Trong lúc dừng sender 0 fps, 0 Mbps (capture bỏ khung trước khi đổi NV12, encoder không chạy, tiếng tắt); tiếp tục → 60 fps 20 Mbps ngay khung sau (IDR ép). Receiver log `paused true/false`, không về màn hình chờ khi đang dừng |
+| `cast_toggle --toggle blank --every 3` → `nanocast-receiver` | `blank on/off` đúng thời điểm, receiver xoá hình rồi hiện lại |
+
+### Mã 4 số
+
+| Thử | Kết quả |
+|---|---|
+| Emulator: `adb shell input keyevent KEYCODE_DPAD_CENTER` | Bật mã (lưu SharedPreferences), hiện `Mã / Code 8958` góc dưới phải, mDNS đăng ký lại (huỷ → đăng ký, ~1 s); bấm lần nữa: tắt |
+| `hello` không mã / sai mã | `error {code: "bad_pin"}` rồi đóng kết nối; overlay đếm `code refused 2` |
+| `spike-send` gửi UDP khi chưa ai nhập đúng mã | Bị bỏ qua: `fps 0.0 (in 0.0)` dù gói đang tới |
+| `hello {pin: "8958"}` | `caps`, hình chạy; sau khi tắt mã, `hello` không mã lại được nhận |
+| Receiver desktop `--pin-code 4321` + `cast_toggle --pin 1111` | Sender kết thúc `Ended(PinRejected)`, 0 khung gửi; `--pin 4321`: cast bình thường |
+| `cargo test -p nanocast-receiver` | `control::pin_required`: sai/thiếu mã không đá sender đang cast, `allows()` chỉ đúng IP, hết kết nối lại cần mã |
+
+### HEVC
+
+| Thử | Kết quả |
+|---|---|
+| `spike-win --codec hevc` (Media Foundation, `MFVideoFormat_HEVC`, profile Main) | NVIDIA HEVC MFT lỗi `CoCreateInstance 0x8000FFFF` (như H.264 trên Optimus) → tự dùng **Intel Hardware H265 Encoder MFT**: 1080p60, 15 Mbps thực tế ở mục tiêu 20 Mbps (màn hình tĩnh), encode p50 13,6 / p95 19,6 ms |
+| Emulator, `ctrl_probe --codec hevc` + `spike-send x.h265` | Receiver đổi `video/avc → video/hevc`, `c2.goldfish.hevc.decoder`, csd-0 = VPS+SPS+PPS; 30 fps, 0 gói mất, decode 15–16,6 ms; `caps.codecs = ["h264","hevc"]`, TXT `codec=h264,hevc` |
+| `cast_toggle --codec hevc` → `nanocast-receiver` | `caps.codecs = ["h264"]` → sender log "sending H.264 instead of Hevc", `CodecFallback::ReceiverH264Only` (GUI ghi lý do) |
+| `cast_toggle --codec hevc` → emulator (nhầm qua adb forward) | Emulator báo có hevc → sender mở Intel H265 MFT và gửi HEVC, đúng như thiết kế |
+
+### GUI
+
+- Chạy `nanocast.exe` (release) cạnh `nanocast-receiver --pin-code 2468 --name PIN-TV`: TV hiện trong danh sách kèm `🔒 code`, có nút Tạm dừng / Màn hình đen (tắt khi chưa cast), ngôn ngữ theo hệ thống (English trên máy dev). Đóng cửa sổ thoát sạch.
+- Test đơn vị: `config` (đọc/ghi, file cũ/thiếu trường/sai giá trị), `i18n` (locale, số `{}` khớp giữa hai ngôn ngữ), dòng trạng thái VI/EN (bitrate + lý do, codec fallback).
+- macOS: `cargo clippy -p nanocast -p nanocast-mac --all-targets --target aarch64-apple-darwin` và `x86_64-apple-darwin` sạch (chỉ type-check).
+
+### Chưa kiểm chứng
+- Bấm thử GUI bằng tay: hộp nhập mã (gửi tin nhắn chuột giả vào cửa sổ egui không có tác dụng nên chưa tự động hoá được), "Tự cast lại khi mở app", đổi ngôn ngữ, lưu `config.json` sau khi đổi cài đặt.
+- TV/box Android thật (HEVC phần cứng thật, mã 4 số với remote thật), Wi-Fi thật cho bitrate thích nghi (mất gói thật, không phải receiver giả), NVIDIA/AMD MFT có áp dụng `MeanBitRate` lúc chạy hay không (code tự kiểm tra và mở lại encoder nếu không).
+- So sánh chất lượng HEVC với H.264 ở cùng bitrate; HEVC trên macOS (chưa làm).
