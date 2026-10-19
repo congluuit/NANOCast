@@ -1,0 +1,12 @@
+[package]
+name = "icongen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Renders assets/icon.svg and assets/banner.svg into PNG, ICO and Android mipmaps"
+
+[dependencies]
+anyhow.workspace = true
+resvg = "0.48"
+ico = "0.6"

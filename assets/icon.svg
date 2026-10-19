@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- NANOCast app icon. Hand-drawn vector: rounded tile, a screen with a
+       bright "beam", and three cast arcs in the lower-left corner. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B1B3A"/>
+      <stop offset="1" stop-color="#123C7A"/>
+    </linearGradient>
+    <linearGradient id="beam" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22D3EE"/>
+      <stop offset="1" stop-color="#34D399"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Tile -->
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#bg)"/>
+
+  <!-- Screen -->
+  <rect x="96" y="120" width="352" height="232" rx="28" fill="none" stroke="#FFFFFF" stroke-width="26"/>
+  <rect x="126" y="150" width="292" height="172" rx="12" fill="url(#beam)"/>
+  <rect x="126" y="150" width="292" height="86" rx="12" fill="url(#gloss)"/>
+
+  <!-- Stand -->
+  <rect x="232" y="352" width="48" height="30" fill="#FFFFFF"/>
+  <rect x="184" y="382" width="144" height="22" rx="11" fill="#FFFFFF"/>
+
+  <!-- Cast arcs (lower-left), drawn over the screen like the Cast glyph -->
+  <circle cx="96" cy="404" r="26" fill="#0B1B3A"/>
+  <circle cx="96" cy="404" r="16" fill="#FFFFFF"/>
+  <path d="M96 346 a58 58 0 0 1 58 58" fill="none" stroke="#0B1B3A" stroke-width="34" stroke-linecap="round"/>
+  <path d="M96 346 a58 58 0 0 1 58 58" fill="none" stroke="#FFFFFF" stroke-width="18" stroke-linecap="round"/>
+  <path d="M96 296 a108 108 0 0 1 108 108" fill="none" stroke="#0B1B3A" stroke-width="34" stroke-linecap="round"/>
+  <path d="M96 296 a108 108 0 0 1 108 108" fill="none" stroke="#FFFFFF" stroke-width="18" stroke-linecap="round"/>
+</svg>
