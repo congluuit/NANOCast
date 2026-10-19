@@ -1,0 +1,27 @@
+[package]
+name = "nanocast-win"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Windows sender pipeline: Windows Graphics Capture -> NV12 -> Media Foundation H.264 -> UDP"
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+nanocast-core.workspace = true
+rayon = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-capture = "2"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }

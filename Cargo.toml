@@ -4,6 +4,7 @@ members = [
     "crates/core",
     "crates/app",
     "crates/spike-win",
+    "crates/win-capture",
     "crates/spike-send",
     "tools/icongen",
 ]
@@ -19,6 +20,7 @@ anyhow = "1"
 log = "0.4"
 env_logger = "0.11"
 nanocast-core = { path = "crates/core" }
+nanocast-win = { path = "crates/win-capture" }
 
 [profile.release]
 opt-level = 3

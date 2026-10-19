@@ -10,10 +10,6 @@
 //!             [--fps 60] [--bitrate-mbps 20] [--encoder <index>] [--out out.h264] [--list]
 //!             [--to <ip[:port]>] [--discover] [--pace-mbps 80] [--keyframe-every <sec>]
 
-mod convert;
-mod ctrl;
-mod mf_encoder;
-
 use std::fs::File;
 use std::io::Write;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
@@ -26,8 +22,6 @@ use anyhow::{bail, Context as _, Result};
 use nanocast_core::control::Message;
 use nanocast_core::discovery;
 use nanocast_core::protocol::{PacedSender, CONTROL_PORT, MAX_PAYLOAD, VIDEO_PORT};
-use windows::Win32::Media::MediaFoundation::{MFStartup, MFSTARTUP_NOSOCKET, MF_VERSION};
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
@@ -38,8 +32,9 @@ use windows_capture::settings::{
 };
 use windows_capture::window::Window;
 
-use ctrl::ControlLink;
-use mf_encoder::{EncoderConfig, MfEncoder};
+use nanocast_win::control_link::ControlLink;
+use nanocast_win::convert;
+use nanocast_win::mf_encoder::{self, EncoderConfig, MfEncoder, MfRuntime};
 
 struct FrameMsg {
     nv12: Vec<u8>,
@@ -123,7 +118,8 @@ struct Args {
     seconds: u64,
     fps: u32,
     bitrate_mbps: u32,
-    encoder: usize,
+    /// None: first encoder that starts, in merit order.
+    encoder: Option<usize>,
     out: String,
     list: bool,
     to: Option<String>,
@@ -139,7 +135,7 @@ fn parse_args() -> Args {
         seconds: 10,
         fps: 60,
         bitrate_mbps: 20,
-        encoder: 0,
+        encoder: None,
         out: "out.h264".into(),
         list: false,
         to: None,
@@ -156,7 +152,7 @@ fn parse_args() -> Args {
             "--seconds" => a.seconds = val().parse().unwrap(),
             "--fps" => a.fps = val().parse().unwrap(),
             "--bitrate-mbps" => a.bitrate_mbps = val().parse().unwrap(),
-            "--encoder" => a.encoder = val().parse().unwrap(),
+            "--encoder" => a.encoder = Some(val().parse().unwrap()),
             "--out" => a.out = val(),
             "--list" => a.list = true,
             "--to" => {
@@ -172,7 +168,7 @@ fn parse_args() -> Args {
     a
 }
 
-fn start_capture<T>(item: T, fps: u32, flags: Flags) -> Result<windows_capture::capture::CaptureControl<Capture, <Capture as GraphicsCaptureApiHandler>::Error>>
+fn start_capture<T>(item: T, _fps: u32, flags: Flags) -> Result<windows_capture::capture::CaptureControl<Capture, <Capture as GraphicsCaptureApiHandler>::Error>>
 where
     T: TryInto<GraphicsCaptureItemType> + Send + 'static,
 {
@@ -200,13 +196,8 @@ fn percentile(sorted: &[u64], p: f64) -> u64 {
 
 fn main() -> Result<()> {
     let args = parse_args();
-    unsafe {
-        let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
-        if hr.is_err() && hr.0 != 0x80010106u32 as i32 {
-            hr.ok().context("CoInitializeEx")?;
-        }
-        MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET).context("MFStartup")?;
-    }
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let _rt = MfRuntime::init()?;
 
     let encoders = mf_encoder::list_hw_h264_encoders()?;
     println!("Hardware H.264 encoders (Media Foundation):");
@@ -384,9 +375,12 @@ fn main() -> Result<()> {
                 bitrate_bps: args.bitrate_mbps * 1_000_000,
                 // Keyframes only on request (or --keyframe-every) once intra refresh works.
                 gop_frames: args.fps * 10,
-                encoder_index: args.encoder,
+                encoder_index: args.encoder.unwrap_or(0),
             };
-            let enc = MfEncoder::new(&cfg)?;
+            let enc = match args.encoder {
+                Some(_) => MfEncoder::new(&cfg)?,
+                None => MfEncoder::open_first_working(&cfg, None, &[])?,
+            };
             println!("Encoder: {} -> {}x{} @ {} fps, {} Mbps, NV12 in", enc.name, msg.width, msg.height, args.fps, args.bitrate_mbps);
             enc_dims = (msg.width, msg.height);
             encoder = Some(enc);
