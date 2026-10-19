@@ -3,7 +3,13 @@
 //!
 //! Usage:
 //!   spike-send <file.h264> [--to 192.168.1.50:48322] [--fps 60] [--pace-mbps 80]
-//!              [--loop] [--seconds N]
+//!              [--loop] [--seconds N] [--audio-dump file.nca]
+//!   spike-send --audio-dump file.nca [--to host] [--loop] [--seconds N]
+//!
+//! `--audio-dump` replays audio packets recorded by
+//! `cargo run -p nanocast-win --example audio_probe -- 20 --dump file.nca`
+//! (u16 LE length + packet, repeated) to UDP AUDIO_PORT on the same host, one per 20 ms,
+//! renumbering seq/pts so looping looks like one continuous stream.
 //!
 //! For an Android emulator: `adb emu redir add udp:48322:48322`, then `--to 127.0.0.1:48322`.
 
@@ -12,7 +18,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context as _, Result};
 use nanocast_core::au::{is_keyframe, split_access_units};
-use nanocast_core::protocol::{sleep_until, PacedSender, MAX_PACKETS_PER_FRAME, MAX_PAYLOAD, VIDEO_PORT};
+use nanocast_core::protocol::{
+    sleep_until, AudioHeader, PacedSender, AUDIO_FRAME_MS, AUDIO_PORT, MAX_PACKETS_PER_FRAME, MAX_PAYLOAD, VIDEO_PORT,
+};
 
 struct Args {
     file: String,
@@ -21,6 +29,7 @@ struct Args {
     pace_mbps: u64,
     looping: bool,
     seconds: Option<f64>,
+    audio_dump: Option<String>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -31,6 +40,7 @@ fn parse_args() -> Result<Args> {
         pace_mbps: 80,
         looping: false,
         seconds: None,
+        audio_dump: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -44,6 +54,7 @@ fn parse_args() -> Result<Args> {
             "--pace-mbps" => a.pace_mbps = val()?.parse()?,
             "--loop" => a.looping = true,
             "--seconds" => a.seconds = Some(val()?.parse()?),
+            "--audio-dump" => a.audio_dump = Some(val()?),
             "-h" | "--help" => {
                 println!("spike-send <file.h264> [--to host[:port]] [--fps 60] [--pace-mbps 80] [--loop] [--seconds N]");
                 std::process::exit(0);
@@ -52,7 +63,7 @@ fn parse_args() -> Result<Args> {
             s => a.file = s.to_string(),
         }
     }
-    if a.file.is_empty() {
+    if a.file.is_empty() && a.audio_dump.is_none() {
         bail!("missing input file (try --help)");
     }
     if a.fps == 0 || a.pace_mbps == 0 {
@@ -63,6 +74,20 @@ fn parse_args() -> Result<Args> {
 
 fn main() -> Result<()> {
     let args = parse_args()?;
+    let audio = match &args.audio_dump {
+        Some(path) => {
+            let packets = read_audio_dump(path)?;
+            let host = args.to.rsplit_once(':').map(|(h, _)| h.to_string()).unwrap_or_else(|| args.to.clone());
+            let to = format!("{host}:{AUDIO_PORT}");
+            let (looping, seconds) = (args.looping, args.seconds);
+            println!("{path}: {} audio packets ({:.1} s) -> {to}", packets.len(), packets.len() as f64 * 0.02);
+            Some(std::thread::spawn(move || send_audio(packets, &to, looping, seconds)))
+        }
+        None => None,
+    };
+    if args.file.is_empty() {
+        return audio.unwrap().join().unwrap();
+    }
     let data = std::fs::read(&args.file).with_context(|| format!("reading {}", args.file))?;
     let aus = split_access_units(&data);
     if aus.is_empty() {
@@ -150,5 +175,52 @@ fn main() -> Result<()> {
         "sent {total_frames} frames / {total_pkts} packets in {secs:.1}s ({:.1} fps)",
         total_frames as f64 / secs
     );
+    if let Some(a) = audio {
+        a.join().unwrap()?;
+    }
+    Ok(())
+}
+
+fn read_audio_dump(path: &str) -> Result<Vec<Vec<u8>>> {
+    let data = std::fs::read(path).with_context(|| format!("reading {path}"))?;
+    let mut out = Vec::new();
+    let mut rest = &data[..];
+    while rest.len() >= 2 {
+        let n = u16::from_le_bytes([rest[0], rest[1]]) as usize;
+        let Some(pkt) = rest.get(2..2 + n) else { break };
+        if AudioHeader::parse(pkt).is_some() {
+            out.push(pkt.to_vec());
+        }
+        rest = &rest[2 + n..];
+    }
+    if out.is_empty() {
+        bail!("no audio packets in {path}");
+    }
+    Ok(out)
+}
+
+fn send_audio(mut packets: Vec<Vec<u8>>, to: &str, looping: bool, seconds: Option<f64>) -> Result<()> {
+    let sock = UdpSocket::bind("0.0.0.0:0")?;
+    sock.connect(to).with_context(|| format!("resolving {to}"))?;
+    let period = Duration::from_millis(AUDIO_FRAME_MS as u64);
+    let started = Instant::now();
+    let mut next = started;
+    let mut seq = 0u32;
+    'outer: loop {
+        for pkt in packets.iter_mut() {
+            if seconds.is_some_and(|s| started.elapsed().as_secs_f64() >= s) {
+                break 'outer;
+            }
+            AudioHeader { seq, pts_ms: seq.wrapping_mul(AUDIO_FRAME_MS) }.write(pkt);
+            seq = seq.wrapping_add(1);
+            sleep_until(next);
+            next += period;
+            let _ = sock.send(pkt);
+        }
+        if !looping {
+            break;
+        }
+    }
+    println!("sent {seq} audio packets in {:.1}s", started.elapsed().as_secs_f64());
     Ok(())
 }

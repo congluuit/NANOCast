@@ -2,7 +2,7 @@
 //! converted to NV12 at a fixed canvas size (the encoder size never changes mid-stream;
 //! a resized window is scaled to fit with black bars).
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -48,8 +48,11 @@ pub struct CaptureCounters {
 
 pub struct CaptureFlags {
     pub tx: SyncSender<CapturedFrame>,
-    /// Minimum spacing between accepted frames (pacing to the target fps).
-    pub min_interval: Duration,
+    /// Minimum spacing between accepted frames in microseconds (pacing to the target fps);
+    /// shared so the session can change the frame rate while capturing.
+    pub interval_us: Arc<AtomicU64>,
+    /// While set, frames are dropped before conversion (pause / blank: no CPU spent).
+    pub paused: Arc<AtomicBool>,
     /// Output (encoder) size; frames of another size are scaled to fit.
     pub canvas: (u32, u32),
     pub counters: Arc<CaptureCounters>,
@@ -73,19 +76,24 @@ impl GraphicsCaptureApiHandler for Capture {
 
     fn on_frame_arrived(&mut self, frame: &mut Frame, control: InternalCaptureControl) -> Result<(), Self::Error> {
         let captured = Instant::now();
+        if self.flags.paused.load(Ordering::Relaxed) {
+            self.next_due = None;
+            return Ok(());
+        }
         // Pace to the target fps: a 144 Hz monitor delivers up to 144 frames/s.
         // Keep a running "next due" time so the average rate is exact even when
         // the monitor period does not divide the target period.
+        let interval = Duration::from_micros(self.flags.interval_us.load(Ordering::Relaxed).max(1));
         match self.next_due {
             Some(due) if captured + Duration::from_millis(1) < due => return Ok(()),
             Some(due) => {
-                let mut next = due + self.flags.min_interval;
-                if next < captured {
-                    next = captured + self.flags.min_interval; // fell behind: resync
+                let mut next = due + interval;
+                if next < captured || next > captured + interval {
+                    next = captured + interval; // fell behind or the rate changed: resync
                 }
                 self.next_due = Some(next);
             }
-            None => self.next_due = Some(captured + self.flags.min_interval),
+            None => self.next_due = Some(captured + interval),
         }
         let (src_w, src_h) = (frame.width(), frame.height());
         if src_w < 16 || src_h < 16 {

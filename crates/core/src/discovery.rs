@@ -1,5 +1,5 @@
 //! LAN discovery over mDNS/DNS-SD. Receivers advertise `_nanocast._udp.local.`
-//! with TXT `w`, `h`, `codec`, `ver`, `ctrl` (control TCP port); the sender browses for them. No daemon,
+//! with TXT `w`, `h`, `codec`, `ver`, `ctrl` (control TCP port), `pin` ("1" = asks for a 4-digit code); the sender browses for them. No daemon,
 //! no accounts, nothing leaves the LAN.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -25,6 +25,8 @@ pub struct ReceiverInfo {
     pub height: Option<u32>,
     pub codec: String,
     pub version: String,
+    /// TXT `pin=1`: the receiver shows a 4-digit code that `hello.pin` must repeat.
+    pub pin: bool,
 }
 
 /// Browses the LAN for receivers for `timeout`, returning each one once.
@@ -68,6 +70,7 @@ pub fn manual_receiver(text: &str) -> Result<ReceiverInfo> {
         height: None,
         codec: "h264".into(),
         version: String::new(),
+        pin: false,
     })
 }
 
@@ -83,6 +86,7 @@ fn to_receiver(info: &ResolvedService) -> Option<ReceiverInfo> {
         height: txt("h").and_then(|v| v.parse().ok()),
         codec: txt("codec").unwrap_or_else(|| "h264".into()),
         version: txt("ver").unwrap_or_default(),
+        pin: txt("pin").is_some_and(|v| v == "1"),
     })
 }
 
@@ -156,7 +160,8 @@ pub struct Advertiser {
 }
 
 impl Advertiser {
-    pub fn new(name: &str, port: u16, width: u32, height: u32) -> Result<Self> {
+    /// `pin`: advertise TXT `pin=1` (the receiver asks for its 4-digit code).
+    pub fn new(name: &str, port: u16, width: u32, height: u32, pin: bool) -> Result<Self> {
         let mdns = ServiceDaemon::new().context("starting mDNS")?;
         let host = format!("{}.local.", sanitize(name));
         let mut txt = HashMap::new();
@@ -165,6 +170,7 @@ impl Advertiser {
         txt.insert("codec".to_string(), "h264".to_string());
         txt.insert("ver".to_string(), PROTOCOL_VERSION.to_string());
         txt.insert("ctrl".to_string(), CONTROL_PORT.to_string());
+        txt.insert("pin".to_string(), if pin { "1" } else { "0" }.to_string());
         let info = ServiceInfo::new(SERVICE_TYPE, name, &host, "", port, txt)
             .context("service info")?
             .enable_addr_auto();
@@ -206,7 +212,7 @@ mod tests {
     #[test]
     #[ignore]
     fn browser_sees_local_advertiser() {
-        let _ad = Advertiser::new("NANOCast test TV", 48399, 1920, 1080).unwrap();
+        let _ad = Advertiser::new("NANOCast test TV", 48399, 1920, 1080, true).unwrap();
         let browser = Browser::new().unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         let found = loop {
@@ -217,7 +223,7 @@ mod tests {
             assert!(Instant::now() < deadline, "advertiser not seen within 5 s");
             std::thread::sleep(Duration::from_millis(100));
         };
-        assert_eq!((found.port, found.ctrl_port, found.width), (48399, CONTROL_PORT, Some(1920)));
+        assert_eq!((found.port, found.ctrl_port, found.width, found.pin), (48399, CONTROL_PORT, Some(1920), true));
         browser.rescan().unwrap();
     }
 }

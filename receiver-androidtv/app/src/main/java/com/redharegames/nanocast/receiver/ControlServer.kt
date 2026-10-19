@@ -33,7 +33,12 @@ import java.util.concurrent.atomic.AtomicLong
  * previous report); `keyframe_request` at most once per 500 ms. Every write runs on one
  * executor thread, so the network and decoder threads never block on TCP.
  */
-class ControlServer(private val stats: Stats, private val deviceName: () -> String) {
+class ControlServer(
+    private val stats: Stats,
+    private val deviceName: () -> String,
+    /** `audio {on}`, `start {audio}`; `stop` and a lost sender count as off. */
+    private val onAudio: (Boolean) -> Unit = {},
+) {
     private val lock = Any()
     private var server: ServerSocket? = null
     private var client: Socket? = null
@@ -140,14 +145,16 @@ class ControlServer(private val stats: Stats, private val deviceName: () -> Stri
                             "${msg.optString("codec")} audio ${if (msg.optBoolean("audio")) "on" else "off"}"
                         Log.i(TAG, "start: $desc")
                         status = "ctrl: $sender ($peer) $desc"
+                        onAudio(msg.optBoolean("audio"))
                     }
                     "audio" -> {
-                        // No audio path yet (PLAN.md Phase 1); acknowledged in the overlay only.
                         val on = msg.optBoolean("on")
-                        Log.i(TAG, "audio ${if (on) "on" else "off"} (not implemented)")
+                        Log.i(TAG, "audio ${if (on) "on" else "off"}")
+                        onAudio(on)
                     }
                     "stop" -> {
                         Log.i(TAG, "stop from $sender")
+                        onAudio(false)
                         status = "ctrl: $sender ($peer) stopped"
                     }
                     else -> Log.w(TAG, "unknown control message type '$t'")
@@ -161,6 +168,7 @@ class ControlServer(private val stats: Stats, private val deviceName: () -> Stri
                 if (client === sock) {
                     client = null
                     connected = false
+                    onAudio(false)
                     status = "ctrl: tcp ${Protocol.CONTROL_PORT} waiting (last: $sender)"
                 }
             }

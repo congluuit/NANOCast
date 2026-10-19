@@ -1,0 +1,44 @@
+[package]
+name = "nanocast-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "NANOCast Linux sender pipeline: PipeWire (xdg-desktop-portal) or X11 capture -> FFmpeg H.264 (VA-API / NVENC / V4L2 M2M / x264) or OpenH264 -> UDP"
+
+# The four native back ends are features so the crate still builds on a machine that lacks
+# one of the system libraries (and so `cargo check --no-default-features` type-checks the
+# rest from any OS). See docs/linux.md.
+[features]
+default = ["pipewire", "ffmpeg", "openh264", "pulse"]
+# xdg-desktop-portal ScreenCast + PipeWire video (Wayland, also X11) and PipeWire system sound.
+pipewire = ["dep:pipewire", "dep:ashpd", "dep:pollster"]
+# H.264 through the system FFmpeg (libavcodec): h264_vaapi, h264_nvenc, h264_v4l2m2m, libx264.
+ffmpeg = ["dep:ffmpeg-sys-next"]
+# Software H.264 built from source (BSD), used when FFmpeg has no usable encoder.
+openh264 = ["dep:openh264"]
+# PulseAudio system sound when PipeWire is not running.
+pulse = ["dep:libpulse-binding", "dep:libpulse-simple-binding"]
+
+[dependencies]
+nanocast-core.workspace = true
+anyhow.workspace = true
+log.workspace = true
+rayon = "1"
+
+# Everything below is only compiled for Linux; on Windows/macOS the crate holds only the
+# platform-neutral helpers (convert, annexb).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+# X11 capture (MIT-SHM, XFixes cursor) and source listing (RandR, EWMH). Pure Rust.
+x11rb = { version = "0.13", features = ["shm", "randr", "xfixes"] }
+# xdg-desktop-portal over D-Bus (pure Rust, zbus on async-io so no tokio runtime is needed).
+ashpd = { version = "0.12", default-features = false, features = ["async-std"], optional = true }
+pollster = { version = "0.4", optional = true }
+pipewire = { version = "0.10", optional = true }
+ffmpeg-sys-next = { version = "8", default-features = false, features = ["avcodec"], optional = true }
+openh264 = { version = "0.9", optional = true }
+libpulse-binding = { version = "2", optional = true }
+libpulse-simple-binding = { version = "2", optional = true }
+
+[dev-dependencies]
+env_logger.workspace = true

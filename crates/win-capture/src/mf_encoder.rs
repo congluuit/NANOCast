@@ -1,4 +1,4 @@
-//! Media Foundation hardware H.264 encoder (asynchronous MFT).
+//! Media Foundation hardware H.264 / HEVC encoder (asynchronous MFT).
 //! Works with the Intel / NVIDIA / AMD vendor MFTs without any vendor SDK.
 
 use std::collections::VecDeque;
@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use log::{debug, info, warn};
+use nanocast_core::protocol::VideoCodec;
 use windows::core::{Interface, GUID, PWSTR};
 use windows::Win32::Foundation::VARIANT_TRUE;
 use windows::Win32::Media::MediaFoundation::*;
@@ -16,13 +17,14 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 
 pub struct EncoderConfig {
+    pub codec: VideoCodec,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
     pub bitrate_bps: u32,
     /// Frames between keyframes (large: keyframes come on request instead).
     pub gop_frames: u32,
-    /// Index into `list_hw_h264_encoders()` (used by `MfEncoder::new`).
+    /// Index into `list_hw_encoders(codec)` (used by `MfEncoder::new`).
     pub encoder_index: usize,
 }
 
@@ -54,6 +56,7 @@ pub struct MfEncoder {
     pending_need_input: u32,
     debug: bool,
     pub name: String,
+    pub video_codec: VideoCodec,
 }
 
 /// COM (multithreaded) + Media Foundation for the current thread, undone on drop.
@@ -110,11 +113,31 @@ fn var_bool(v: bool) -> VARIANT {
     var
 }
 
+fn subtype(codec: VideoCodec) -> GUID {
+    match codec {
+        VideoCodec::H264 => MFVideoFormat_H264,
+        VideoCodec::Hevc => MFVideoFormat_HEVC,
+    }
+}
+
+fn codec_label(codec: VideoCodec) -> &'static str {
+    match codec {
+        VideoCodec::H264 => "H.264",
+        VideoCodec::Hevc => "HEVC",
+    }
+}
+
 /// Lists hardware H.264 encoder MFTs, sorted by Media Foundation merit.
 /// COM and Media Foundation must be initialised on this thread (see `MfRuntime`).
 pub fn list_hw_h264_encoders() -> Result<Vec<(String, IMFActivate)>> {
+    list_hw_encoders(VideoCodec::H264)
+}
+
+/// Lists hardware encoder MFTs for `codec`, sorted by Media Foundation merit.
+/// COM and Media Foundation must be initialised on this thread (see `MfRuntime`).
+pub fn list_hw_encoders(codec: VideoCodec) -> Result<Vec<(String, IMFActivate)>> {
     unsafe {
-        let out_info = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_H264 };
+        let out_info = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: subtype(codec) };
         let mut pp: *mut Option<IMFActivate> = std::ptr::null_mut();
         let mut count = 0u32;
         MFTEnumEx(
@@ -149,12 +172,12 @@ pub fn list_hw_h264_encoders() -> Result<Vec<(String, IMFActivate)>> {
     }
 }
 
-/// Names of the hardware H.264 encoders, in merit order. Safe to call from any thread
+/// Names of the hardware encoders for `codec`, in merit order. Safe to call from any thread
 /// (including a GUI thread): the work happens on a short-lived MTA thread.
-pub fn hw_encoder_names() -> Result<Vec<String>> {
-    std::thread::spawn(|| {
+pub fn hw_encoder_names(codec: VideoCodec) -> Result<Vec<String>> {
+    std::thread::spawn(move || {
         let _rt = MfRuntime::init()?;
-        Ok(list_hw_h264_encoders()?.into_iter().map(|(n, _)| n).collect())
+        Ok(list_hw_encoders(codec)?.into_iter().map(|(n, _)| n).collect())
     })
     .join()
     .map_err(|_| anyhow!("encoder enumeration panicked"))?
@@ -163,9 +186,9 @@ pub fn hw_encoder_names() -> Result<Vec<String>> {
 impl MfEncoder {
     /// Opens the encoder at `cfg.encoder_index` (merit order).
     pub fn new(cfg: &EncoderConfig) -> Result<Self> {
-        let encoders = list_hw_h264_encoders()?;
+        let encoders = list_hw_encoders(cfg.codec)?;
         if encoders.is_empty() {
-            bail!("no hardware H.264 encoder found (Media Foundation)");
+            bail!("no hardware {} encoder found (Media Foundation)", codec_label(cfg.codec));
         }
         let (name, activate) =
             encoders.into_iter().nth(cfg.encoder_index).ok_or_else(|| anyhow!("encoder index out of range"))?;
@@ -177,9 +200,9 @@ impl MfEncoder {
     /// Some vendor MFTs are listed but refuse to start (NVIDIA on an Optimus laptop
     /// fails with E_UNEXPECTED), so a failure only moves on to the next one.
     pub fn open_first_working(cfg: &EncoderConfig, preferred: Option<&str>, skip: &[String]) -> Result<Self> {
-        let mut encoders = list_hw_h264_encoders()?;
+        let mut encoders = list_hw_encoders(cfg.codec)?;
         if encoders.is_empty() {
-            bail!("no hardware H.264 encoder found (Media Foundation)");
+            bail!("no hardware {} encoder found (Media Foundation)", codec_label(cfg.codec));
         }
         if let Some(p) = preferred {
             if let Some(i) = encoders.iter().position(|(n, _)| n == p) {
@@ -200,7 +223,7 @@ impl MfEncoder {
                 }
             }
         }
-        bail!("no hardware H.264 encoder could be started ({})", errors.join("; "))
+        bail!("no hardware {} encoder could be started ({})", codec_label(cfg.codec), errors.join("; "))
     }
 
     fn from_activate(name: String, activate: IMFActivate, cfg: &EncoderConfig) -> Result<Self> {
@@ -218,6 +241,7 @@ impl MfEncoder {
                 pending_need_input: 0,
                 debug: std::env::var_os("NANOCAST_DEBUG").is_some(),
                 name,
+                video_codec: cfg.codec,
             }),
             Err(e) => {
                 unsafe {
@@ -276,13 +300,17 @@ impl MfEncoder {
         // Output type first (encoders want it before the input type).
         let out_type = MFCreateMediaType()?;
         out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-        out_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
+        out_type.SetGUID(&MF_MT_SUBTYPE, &subtype(cfg.codec))?;
         out_type.SetUINT32(&MF_MT_AVG_BITRATE, cfg.bitrate_bps)?;
         out_type.SetUINT64(&MF_MT_FRAME_SIZE, ((cfg.width as u64) << 32) | cfg.height as u64)?;
         out_type.SetUINT64(&MF_MT_FRAME_RATE, ((cfg.fps as u64) << 32) | 1)?;
         out_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-        out_type.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main.0 as u32)?;
-        transform.SetOutputType(0, &out_type, 0).context("SetOutputType H264")?;
+        let profile = match cfg.codec {
+            VideoCodec::H264 => eAVEncH264VProfile_Main.0 as u32,
+            VideoCodec::Hevc => eAVEncH265VProfile_Main_420_8.0 as u32,
+        };
+        out_type.SetUINT32(&MF_MT_MPEG2_PROFILE, profile)?;
+        transform.SetOutputType(0, &out_type, 0).with_context(|| format!("SetOutputType {}", codec_label(cfg.codec)))?;
 
         let in_type = MFCreateMediaType()?;
         in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
@@ -302,7 +330,14 @@ impl MfEncoder {
         transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
 
         let events: IMFMediaEventGenerator = transform.cast().context("IMFMediaEventGenerator")?;
-        info!("encoder {name}: {}x{} @ {} fps, {} kbps", cfg.width, cfg.height, cfg.fps, cfg.bitrate_bps / 1000);
+        info!(
+            "encoder {name}: {} {}x{} @ {} fps, {} kbps",
+            codec_label(cfg.codec),
+            cfg.width,
+            cfg.height,
+            cfg.fps,
+            cfg.bitrate_bps / 1000
+        );
         Ok((transform, events, codec, provides_samples, info.cbSize.max(cfg.width * cfg.height)))
     }
 
@@ -370,6 +405,23 @@ impl MfEncoder {
         if let Some(codec) = &self.codec {
             if let Err(e) = unsafe { codec.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &var_u32(1)) } {
                 warn!("[codecapi] ForceKeyFrame failed: {e}");
+            }
+        }
+    }
+
+    /// Changes the CBR target while encoding (`CODECAPI_AVEncCommonMeanBitRate` is a
+    /// dynamic property on most vendor MFTs). `false` when the encoder refused it; the
+    /// caller then reopens the encoder with the new bitrate.
+    pub fn set_bitrate(&mut self, bitrate_bps: u32) -> bool {
+        let Some(codec) = &self.codec else { return false };
+        match unsafe { codec.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var_u32(bitrate_bps)) } {
+            Ok(()) => {
+                info!("encoder {}: bitrate now {} kbps (on the fly)", self.name, bitrate_bps / 1000);
+                true
+            }
+            Err(e) => {
+                info!("encoder {}: dynamic bitrate change refused ({e}); reopening", self.name);
+                false
             }
         }
     }

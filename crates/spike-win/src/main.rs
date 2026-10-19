@@ -259,7 +259,7 @@ fn main() -> Result<()> {
         // cannot ask for a keyframe after a loss.
         let ctrl_addr = SocketAddr::new(addr.ip(), ctrl_port);
         let name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "NANOCast PC".into());
-        match ControlLink::open(ctrl_addr, &name, want_keyframe.clone()) {
+        match ControlLink::open(ctrl_addr, &name, None, want_keyframe.clone()) {
             Ok(link) => {
                 println!("Control channel: connected to {ctrl_addr}");
                 control_link = Some(link);
@@ -369,6 +369,7 @@ fn main() -> Result<()> {
 
         if encoder.is_none() {
             let cfg = EncoderConfig {
+                codec: nanocast_core::protocol::VideoCodec::H264,
                 width: msg.width,
                 height: msg.height,
                 fps: args.fps,

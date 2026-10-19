@@ -1,4 +1,5 @@
-//! Sender side of the control channel: hello/start/stop out, caps/keyframe_request/stats in.
+//! Sender side of the control channel: hello/start/audio/pause/blank/stop out,
+//! caps/error/keyframe_request/stats in.
 //! Optional by design: if the receiver has no control port the UDP stream still works.
 
 use std::io;
@@ -19,10 +20,16 @@ pub struct ReceiverReport {
     pub name: Option<String>,
     pub max_size: Option<(u32, u32)>,
     pub low_latency: Option<bool>,
+    /// `caps.codecs` ("h264", "hevc").
+    pub codecs: Option<Vec<String>>,
+    /// `error.code` from the receiver, e.g. `bad_pin` (it closes the connection after it).
+    pub error: Option<String>,
     /// From the latest `stats` (one per second).
     pub stats: Option<TvStats>,
     /// Packets lost, summed over every `stats` received.
     pub lost_total: u64,
+    /// Number of `stats` received (lets the adaptive bitrate see each new report once).
+    pub stats_count: u64,
     /// `false` once the receiver closed the connection or it failed.
     pub connected: bool,
 }
@@ -44,11 +51,13 @@ pub struct ControlLink {
 }
 
 impl ControlLink {
-    /// Connects (timeout 1 s), sends `hello`, and starts a reader thread that sets
-    /// `want_keyframe` whenever the receiver sends `keyframe_request`.
-    pub fn open(addr: SocketAddr, name: &str, want_keyframe: Arc<AtomicBool>) -> io::Result<Self> {
+    /// Connects (timeout 1 s), sends `hello` (with the TV's 4-digit code if given), and
+    /// starts a reader thread that sets `want_keyframe` whenever the receiver sends
+    /// `keyframe_request`.
+    pub fn open(addr: SocketAddr, name: &str, pin: Option<&str>, want_keyframe: Arc<AtomicBool>) -> io::Result<Self> {
         let mut stream = control::connect(addr, Duration::from_secs(1))?;
-        control::write_msg(&mut stream, &Message::Hello { ver: PROTOCOL_VERSION.into(), name: name.into() })?;
+        let hello = Message::Hello { ver: PROTOCOL_VERSION.into(), name: name.into(), pin: pin.map(str::to_string) };
+        control::write_msg(&mut stream, &hello)?;
         let closing = Arc::new(AtomicBool::new(false));
         let keyframe_requests = Arc::new(AtomicUsize::new(0));
         let report = Arc::new(Mutex::new(ReceiverReport { connected: true, ..Default::default() }));
@@ -115,6 +124,11 @@ fn handle(msg: Message, want_keyframe: &AtomicBool, requests: &AtomicUsize, repo
             r.name = Some(name);
             r.max_size = (max_w > 0 && max_h > 0).then_some((max_w, max_h));
             r.low_latency = Some(low_latency);
+            r.codecs = Some(codecs);
+        }
+        Message::Error { code, message } => {
+            warn!("[ctrl] receiver refused: {code} {message}");
+            report.lock().unwrap().error = Some(code);
         }
         Message::KeyframeRequest { reason } => {
             want_keyframe.store(true, Ordering::Relaxed);
@@ -126,6 +140,7 @@ fn handle(msg: Message, want_keyframe: &AtomicBool, requests: &AtomicUsize, repo
             let mut r = report.lock().unwrap();
             r.stats = Some(TvStats { fps, lost, decode_ms });
             r.lost_total += lost;
+            r.stats_count += 1;
         }
         other => warn!("[ctrl] ignored unexpected message {other:?}"),
     }

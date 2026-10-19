@@ -6,6 +6,12 @@
 //! access units, `idx`/`count` place the packet inside its frame. A 1080p
 //! keyframe can exceed 300 KB, so idx/count are 16-bit (255 x 1200 B was too small).
 //!
+//! Audio packet (separate UDP port AUDIO_PORT) = 10-byte big-endian header + one Opus frame:
+//!   magic u16 = AUDIO_MAGIC | seq u32 | pts_ms u32
+//! One packet = one 20 ms Opus frame, 48 kHz stereo. `seq` counts packets (loss detection),
+//! `pts_ms` is the stream time of the frame's first sample (wraps after ~49 days).
+//! An empty payload (header only) means 20 ms of silence: play zeros, do not decode.
+//!
 //! The Kotlin receiver mirrors these constants in `Protocol.kt`.
 
 use std::io;
@@ -16,12 +22,64 @@ pub const MAGIC: u16 = 0x4E43; // "NC"
 pub const VIDEO_PORT: u16 = 48322;
 /// TCP control channel (JSON lines, see `control`). Receivers may override it with TXT `ctrl`.
 pub const CONTROL_PORT: u16 = 48323;
+/// UDP audio (Opus) stream, only while audio is on.
+pub const AUDIO_PORT: u16 = 48324;
+pub const AUDIO_MAGIC: u16 = 0x4E41; // "NA"
+pub const AUDIO_HEADER_LEN: usize = 10;
+pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
+pub const AUDIO_CHANNELS: usize = 2;
+pub const AUDIO_FRAME_MS: u32 = 20;
+/// Samples per channel in one packet (20 ms at 48 kHz).
+pub const AUDIO_FRAME_SAMPLES: usize = 960;
+pub const AUDIO_BITRATE: i32 = 96_000;
+/// Largest Opus payload we produce (a 20 ms frame at 96 kbps averages 240 B).
+pub const AUDIO_MAX_PAYLOAD: usize = 1200;
 pub const HEADER_LEN: usize = 14;
 pub const MAX_PAYLOAD: usize = 1200;
 /// Receivers preallocate this many slots per frame: 1024 x 1200 B = 1.2 MB per frame.
 pub const MAX_PACKETS_PER_FRAME: usize = 1024;
 pub const SERVICE_TYPE: &str = "_nanocast._udp.local.";
 pub const PROTOCOL_VERSION: &str = "0.1";
+
+/// Video codec of the stream (`start.codec`, `caps.codecs`, TXT `codec`). The packet format
+/// is the same for both: one Annex B access unit per frame. H.264 is the default; HEVC
+/// only when the receiver lists it in `caps.codecs`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoCodec {
+    #[default]
+    H264,
+    Hevc,
+}
+
+impl VideoCodec {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::H264 => "h264",
+            Self::Hevc => "hevc",
+        }
+    }
+
+    /// "h264" / "avc" / "hevc" / "h265" (any case); `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "h264" | "avc" => Some(Self::H264),
+            "hevc" | "h265" => Some(Self::Hevc),
+            _ => None,
+        }
+    }
+
+    /// What to send when `wanted` is asked for and the receiver decodes `codecs`
+    /// (from `caps`; `None` = unknown, e.g. no control channel): HEVC only if listed.
+    pub fn negotiate(wanted: Self, codecs: Option<&[String]>) -> Self {
+        let listed = |c: Self| codecs.is_some_and(|list| list.iter().any(|s| Self::parse(s) == Some(c)));
+        if wanted == Self::Hevc && listed(Self::Hevc) {
+            Self::Hevc
+        } else {
+            Self::H264
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VideoHeader {
@@ -50,6 +108,31 @@ impl VideoHeader {
             frame_id: u32::from_be_bytes([buf[6], buf[7], buf[8], buf[9]]),
             idx: u16::from_be_bytes([buf[10], buf[11]]),
             count: u16::from_be_bytes([buf[12], buf[13]]),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioHeader {
+    pub seq: u32,
+    pub pts_ms: u32,
+}
+
+impl AudioHeader {
+    pub fn write(&self, buf: &mut [u8]) {
+        buf[0..2].copy_from_slice(&AUDIO_MAGIC.to_be_bytes());
+        buf[2..6].copy_from_slice(&self.seq.to_be_bytes());
+        buf[6..10].copy_from_slice(&self.pts_ms.to_be_bytes());
+    }
+
+    /// Parses a header; `None` if the packet is too short or the magic does not match.
+    pub fn parse(buf: &[u8]) -> Option<Self> {
+        if buf.len() < AUDIO_HEADER_LEN || u16::from_be_bytes([buf[0], buf[1]]) != AUDIO_MAGIC {
+            return None;
+        }
+        Some(Self {
+            seq: u32::from_be_bytes([buf[2], buf[3], buf[4], buf[5]]),
+            pts_ms: u32::from_be_bytes([buf[6], buf[7], buf[8], buf[9]]),
         })
     }
 }
@@ -157,6 +240,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn codec_negotiation() {
+        let both = vec!["h264".to_string(), "hevc".to_string()];
+        let avc = vec!["h264".to_string()];
+        assert_eq!(VideoCodec::negotiate(VideoCodec::Hevc, Some(&both)), VideoCodec::Hevc);
+        assert_eq!(VideoCodec::negotiate(VideoCodec::Hevc, Some(&avc)), VideoCodec::H264);
+        assert_eq!(VideoCodec::negotiate(VideoCodec::Hevc, None), VideoCodec::H264);
+        assert_eq!(VideoCodec::negotiate(VideoCodec::H264, Some(&both)), VideoCodec::H264);
+        assert_eq!(VideoCodec::parse(" HEVC "), Some(VideoCodec::Hevc));
+        assert_eq!(VideoCodec::parse("vp9"), None);
+        assert_eq!(serde_json::to_string(&VideoCodec::Hevc).unwrap(), "\"hevc\"");
+    }
+
+    #[test]
     fn header_roundtrip() {
         let h = VideoHeader { seq: 0xDEADBEEF, frame_id: 42, idx: 300, count: 900 };
         let mut buf = [0u8; HEADER_LEN];
@@ -165,6 +261,20 @@ mod tests {
         assert_eq!(VideoHeader::parse(&buf[..13]), None);
         buf[0] = 0;
         assert_eq!(VideoHeader::parse(&buf), None);
+    }
+
+    #[test]
+    fn audio_header_roundtrip() {
+        let h = AudioHeader { seq: 7, pts_ms: 0xFFFF_FFF0 };
+        let mut buf = [0u8; AUDIO_HEADER_LEN];
+        h.write(&mut buf);
+        assert_eq!(&buf[..2], b"NA");
+        assert_eq!(AudioHeader::parse(&buf), Some(h));
+        assert_eq!(AudioHeader::parse(&buf[..9]), None);
+        // A video packet is not an audio packet.
+        let mut v = [0u8; HEADER_LEN];
+        VideoHeader { seq: 1, frame_id: 1, idx: 0, count: 1 }.write(&mut v);
+        assert_eq!(AudioHeader::parse(&v), None);
     }
 
     #[test]

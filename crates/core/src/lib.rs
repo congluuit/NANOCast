@@ -1,7 +1,10 @@
-//! NANOCast core: wire protocol, control channel, H.264 access-unit helpers, LAN discovery, and the
+//! NANOCast core: wire protocol, control channel, adaptive bitrate logic, H.264 access-unit helpers, Opus audio packets,
+//! LAN discovery, and the
 //! capture/encoder traits that platform crates implement.
 
+pub mod adapt;
 pub mod au;
+pub mod audio;
 pub mod control;
 pub mod discovery;
 pub mod protocol;

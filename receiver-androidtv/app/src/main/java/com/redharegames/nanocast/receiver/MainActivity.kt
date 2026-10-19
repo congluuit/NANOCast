@@ -20,12 +20,14 @@ import java.util.Locale
 
 /**
  * Spike receiver: full-screen SurfaceView fed by UDP → FrameAssembler → MediaCodec,
- * a TCP control channel (keyframe requests, stats) and a small stats overlay in the top-left corner.
+ * system sound (UDP Opus → [AudioPlayer]), a TCP control channel (keyframe requests, stats,
+ * audio on/off) and a small stats overlay in the top-left corner.
  */
 class MainActivity : Activity(), SurfaceHolder.Callback {
     private val stats = Stats()
     private lateinit var discovery: Discovery
     private lateinit var control: ControlServer
+    private val audio = AudioPlayer()
     private lateinit var overlay: TextView
     private var decoder: VideoDecoder? = null
     private var receiver: UdpReceiver? = null
@@ -43,7 +45,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         discovery = Discovery(this)
-        control = ControlServer(stats) { discovery.registeredName ?: discovery.deviceName() }
+        control = ControlServer(stats, { discovery.registeredName ?: discovery.deviceName() }, audio::setEnabled)
 
         val surfaceView = SurfaceView(this).apply { holder.addCallback(this@MainActivity) }
         overlay = TextView(this).apply {
@@ -73,11 +75,17 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         } catch (e: Exception) {
             Log.e(TAG, "cannot bind TCP ${Protocol.CONTROL_PORT}", e)
         }
+        try {
+            audio.start()
+        } catch (e: Exception) {
+            Log.e(TAG, "cannot bind UDP ${Protocol.AUDIO_PORT}", e)
+        }
         ui.post(tick)
     }
 
     override fun onStop() {
         ui.removeCallbacks(tick)
+        audio.stop()
         control.stop()
         discovery.unregister()
         super.onStop()
@@ -109,9 +117,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     private fun updateOverlay() {
         val s = stats.snapshot()
+        val audioKbps = audio.kbps()
         val text = buildString {
             append("NANOCast  ").append(localIps()).append(" udp:").append(Protocol.VIDEO_PORT)
-                .append(" tcp:").append(Protocol.CONTROL_PORT).append('\n')
+                .append(" tcp:").append(Protocol.CONTROL_PORT).append(" audio:").append(Protocol.AUDIO_PORT).append('\n')
             append(discovery.status).append('\n')
             append(control.status).append("  kf req ").append(control.keyframeRequests.get()).append('\n')
             append("decoder ").append(stats.codecName)
@@ -121,7 +130,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             append(fmt("lost pkts %d  dropped frames %d  dec err %d",
                 stats.lostPackets.get(), stats.droppedFrames.get(), stats.decoderErrors.get())).append('\n')
             append(fmt("decode ms  avg %.2f  p95 %.2f   (session p50 %.1f p95 %.1f p99 %.1f, n=%d)",
-                s.windowAvgMs, s.windowP95Ms, s.sessionP50Ms, s.sessionP95Ms, s.sessionP99Ms, s.sessionN))
+                s.windowAvgMs, s.windowP95Ms, s.sessionP50Ms, s.sessionP95Ms, s.sessionP99Ms, s.sessionN)).append('\n')
+            append(fmt("%.0f kbps  ", audioKbps)).append(audio.overlayLine())
         }
         overlay.text = text
 
@@ -136,6 +146,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 s.framesIn, s.framesOut, s.avgAssemblyMs, s.windowAvgMs, s.windowP95Ms,
                 s.sessionN, s.sessionAvgMs, s.sessionP50Ms, s.sessionP95Ms, s.sessionP99Ms,
             ))
+        }
+        if (ticks % (LOG_MS / OVERLAY_MS).toInt() == 0 && audio.packets.get() > 0) {
+            Log.i("NANOCast.Stats", fmt("audio kbps=%.1f pkts=%d ", audioKbps, audio.packets.get()) + audio.overlayLine())
         }
     }
 

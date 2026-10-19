@@ -77,7 +77,7 @@ Cửa sổ không phải 16:9 → letterbox nền đen trên GPU.
   - Control là tuỳ chọn: không kết nối được thì sender vẫn stream UDP (chỉ mất khả năng xin keyframe).
   - Mã: `crates/core/src/control.rs` (enum `Message`, `write_msg`, `ControlReader`), `receiver-androidtv/.../ControlServer.kt`.
 - **Video (UDP):** header 14 byte big-endian: `magic u16 | seq u32 | frame_id u32 | idx u16 | count u16` + payload H.264 Annex B ≤1200 byte (tối đa 1024 gói/khung ≈ 1,2 MB; keyframe 1080p có thể >300 KB nên u8 không đủ). Gói của một khung được **rải đều** theo tốc độ trần (mặc định 80 Mbps) để không tràn buffer UDP của TV. Mất gói → receiver gửi `keyframe_request`; sender ép keyframe (`AVEncVideoForceKeyFrame`). Intra-refresh chỉ dùng khi encoder hỗ trợ (QSV qua Media Foundation không hỗ trợ).
-- **Audio (UDP):** Opus 20 ms, 96 kbps, header giống video. Tắt âm = không có luồng này.
+- **Audio (UDP cổng 48324, `AUDIO_PORT`):** header 10 byte big-endian `magic u16 = 0x4E41 ("NA") | seq u32 | pts_ms u32` + payload Opus; một gói = một frame Opus 20 ms, 48 kHz stereo, 96 kbps VBR, application Audio, complexity 3 (`AUDIO_*` trong `protocol.rs`). `seq` đếm gói (phát hiện mất, nối tiếp qua các lần bật/tắt trong một lần cast), `pts_ms` = thời điểm mẫu đầu của frame. **Payload rỗng = 20 ms im lặng**: khi không có gì phát (loopback trả 0 hoặc không trả gì) sender vẫn gửi mỗi 20 ms một gói chỉ có header (4 kbps) để receiver giữ nhịp; không dùng DTX vì libopus 1.3.1 chỉ có DTX ở chế độ SILK (thoại), khung CELT im lặng vẫn ~240 B. Opus pre-skip = 312 mẫu (OpusHead của receiver). Bật/tắt: sender gửi `audio {on}` trên kênh control; tắt = dừng capture hẳn, không có luồng UDP này. Receiver giữ ≤ 80 ms trong AudioTrack, bỏ gói khi đầy hoặc khi > 100 ms đang chờ, `audio {on:false}` / `stop` → xả buffer và im lặng. Mã: `crates/core/src/audio.rs`, `crates/win-capture/src/audio.rs`, `receiver-androidtv/.../AudioPlayer.kt`.
 - Không mã hoá (LAN lớp học); tuỳ chọn mã 4 số hiển thị trên TV khi bật trong receiver.
 
 ## 5. Lộ trình
@@ -89,21 +89,21 @@ Mục tiêu: cast được, đo được số, dùng được trong lớp.
 - [ ] `Capturer` Windows: WGC màn hình + cửa sổ (crate `windows-capture` hoặc `windows-rs` trực tiếp), lấy D3D11 texture, phát hiện khung không đổi để bỏ qua.
 - [ ] `Encoder` Windows: Media Foundation H.264 HW, nhận D3D11 texture (DXGI device manager), low-latency mode, CBR, không B-frame, GOP vô hạn + intra-refresh. Benchmark trên máy iGPU Intel đời 2015.
 - [x] Packetizer UDP + control TCP + mDNS browse.
-- [ ] Audio: WASAPI loopback (`cpal`) → Opus (`audiopus`), toggle.
-- [x] GUI egui: danh sách TV tự cập nhật, nút Cast màn hình / Cast app (chọn từ danh sách cửa sổ) / Âm thanh / Dừng, hiển thị fps + bitrate + ms. *(nút Âm thanh để disabled tới Phase 1b)*
+- [x] Audio: WASAPI loopback (`cpal`) → Opus (`unsafe-libopus`: libopus 1.3.1 chuyển sang Rust, không cần CMake/C), toggle.
+- [x] GUI egui: danh sách TV tự cập nhật, nút Cast màn hình / Cast app (chọn từ danh sách cửa sổ) / Âm thanh / Dừng, hiển thị fps + bitrate + ms (+ kbps âm thanh).
 - [ ] Receiver Android TV (Kotlin): NsdManager quảng bá, nhận UDP, ráp frame, MediaCodec `KEY_LOW_LATENCY`, SurfaceView, AudioTrack. APK sideload + Play Store (free).
 - [ ] Đo trễ bằng quay 240 fps, ghi `docs/benchmark.md`. Tối ưu cho tới khi đạt §7.
 
 ### Phase 2 — Hoàn thiện cho lớp học (2 tuần)
-- [ ] Receiver desktop bằng Rust (`nanocast-receiver`): cho máy chiếu/TV thường qua PC cũ hoặc Raspberry Pi; decode bằng HW của máy đó.
+- [x] Receiver desktop bằng Rust (`nanocast-receiver`): cho máy chiếu/TV thường qua PC cũ hoặc Raspberry Pi. *(2026-10-19: mDNS + UDP + control + audio, OpenH264 phần mềm + wgpu full screen, kiểm chứng trên Windows với `spike-send`/`spike-win`; còn: decode HW của máy đó (d3d11va/vaapi/v4l2m2m), chạy thử Pi/Linux — `docs/benchmark.md` mục Receiver desktop)*
 - [ ] Tự thích nghi bitrate theo mất gói / RTT; hạ 1080p30 khi Wi-Fi yếu và báo trên GUI.
 - [ ] Nút **Tạm dừng** (đóng băng hình trên TV khi giáo viên làm việc riêng) và **Màn hình đen**.
 - [ ] Nhớ TV đã dùng, tự cast lại khi mở app (tuỳ chọn).
 - [ ] Mã 4 số tuỳ chọn trên receiver để tránh học sinh cast đè.
-- [ ] Installer nhỏ (Inno Setup) hoặc chỉ 1 exe portable; bản tiếng Việt / English.
+- [x] Installer nhỏ (Inno Setup) hoặc chỉ 1 exe portable; bản tiếng Việt / English. (`installer/`: setup 4,7 MB cài không cần admin + zip portable; CI và release tự động trong `.github/workflows/`)
 
 ### Phase 3 — Đa nền tảng (3–4 tuần)
-- [ ] macOS: ScreenCaptureKit + VideoToolbox + audio tap (crate `screencapturekit`, `objc2`).
+- [x] macOS: ScreenCaptureKit + VideoToolbox + audio tap — **viết xong, CHƯA KIỂM CHỨNG trên Mac thật** (2026-10-19). `crates/mac-capture` (`nanocast-mac`, bindings `objc2-*` 0.3): SCStream NV12 scale sẵn trên GPU (màn hình hoặc một cửa sổ, 1/fps, queueDepth 3, có con trỏ) → VTCompressionSession H.264 (RealTime, không B-frame, low-latency rate control nếu máy hỗ trợ, ép IDR theo `keyframe_request`) → AVCC→Annex B + SPS/PPS trước mỗi keyframe → `PacedSender`; âm thanh SCK `capturesAudio` (macOS 13+) → Opus → UDP 48324. API giống `nanocast-win` (`session::CastSession`, `sources`, `capture::Source`). Đã: `cargo check` cho `x86_64-apple-darwin` và `aarch64-apple-darwin` sạch (kể cả clippy) từ Windows, test AVCC→Annex B chạy trên Windows. Chưa: chạy trên Mac, nối GUI `crates/app` (cần sửa `cfg`), đóng gói `.app` universal + ký. Hướng dẫn build/quyền/các lỗi có thể gặp: `docs/macos.md`.
 - [ ] Linux: PipeWire capture + VA-API encode.
 - [ ] HEVC/AV1 cho TV mới (giảm bitrate một nửa ở cùng chất lượng), giữ H.264 làm mặc định.
 - [ ] Receiver cho LG webOS / Samsung Tizen qua transport WebRTC (`webrtc-rs`) — tuỳ chọn, chỉ khi có nhu cầu thật; cách rẻ hơn là box Android TV ~500k.
@@ -116,7 +116,7 @@ Mục tiêu: cast được, đo được số, dùng được trong lớp.
 | Capture Windows | `windows-capture` hoặc `windows` (WGC) | Màn hình + cửa sổ, texture GPU |
 | Encode Windows | `windows` (Media Foundation) | HW của mọi hãng, không cần SDK NVIDIA/AMD |
 | Fallback encode | `openh264` | Máy không có HW encoder |
-| Audio | `cpal` (WASAPI loopback) + `audiopus` | Opus 48 kHz stereo |
+| Audio | `cpal` (WASAPI loopback) + `unsafe-libopus` | Opus 48 kHz stereo; Rust thuần nên không cần CMake (audiopus/opus-sys đều cần) |
 | Discovery | `mdns-sd` | Không cần daemon |
 | Mạng | `tokio` (UDP/TCP) | |
 | Receiver TV | Kotlin, MediaCodec, NsdManager | ~1k dòng, không thư viện ngoài |
@@ -180,5 +180,13 @@ NANOCast/
    - `crates/win-capture` (`nanocast-win`): capture WGC + pacing fps, NV12 (CPU) vào khung cố định (màn hình: kích thước thật, tối đa 1080p; cửa sổ: 1920×1080, co giãn giữ tỉ lệ + viền đen nên đổi cỡ cửa sổ không cần stream mới), `MfEncoder` (thử lần lượt HW encoder theo merit, bỏ qua cái lỗi kể cả khi lỗi ở khung đầu; Shutdown MFT khi giải phóng), `ControlLink`, `CastSession` (luồng riêng, dừng sạch theo thứ tự capture → mạng → encoder → `stop`). `spike-win` dùng lại crate này.
    - `crates/app`: GUI eframe/egui (glow), tiếng Việt (font Segoe UI của Windows), danh sách TV mDNS liên tục (`discovery::Browser`) + Quét lại + nhập IP tay, Cast màn hình (chọn màn hình), Cast ứng dụng… (lọc cửa sổ), Dừng, trạng thái PC/TV/keyframe_request, Cài đặt encoder/bitrate/fps. Release: subsystem GUI (không console), 7,1 MB, không cần admin.
    - Kiểm chứng trên máy dev: NVIDIA MFT lỗi → tự dùng QSV; cast màn hình và cửa sổ tới receiver giả (Python, 127.0.0.1) 60 fps, 20–30 Mbps, encode ~12 ms; `hello/start/stop`, `stats`, `keyframe_request` hiện trên GUI; Dừng và đóng cửa sổ đều gửi `stop` và thoát sạch; TV giả quảng bá mDNS hiện trong danh sách < 2,5 s.
-   - Chưa: âm thanh (Phase 1b), TV thật trên LAN thật, chọn IP đúng subnet khi receiver có nhiều IP (hiện lấy IPv4 nhỏ nhất), lưu cài đặt, GPU color convert/zero-copy, scale chất lượng cao (đang nearest-neighbour).
-   Tiếp theo: thử với TV/box Android thật + đo glass-to-glass; Phase 1b audio.
+   - Chưa: TV thật trên LAN thật, chọn IP đúng subnet khi receiver có nhiều IP (hiện lấy IPv4 nhỏ nhất), lưu cài đặt, GPU color convert/zero-copy, scale chất lượng cao (đang nearest-neighbour).
+   Tiếp theo: thử với TV/box Android thật + đo glass-to-glass.
+6. ~~Phase 1b: âm thanh hệ thống PC → TV, bật/tắt trong lúc cast~~ **Xong 2026-10-19** (giao thức §4 *Audio*):
+   - `nanocast_core::audio`: `OpusEncoder`/`OpusDecoder` (unsafe-libopus), `to_stereo` (mono/5.1/7.1 → stereo), `Resampler` (tuyến tính, khi thiết bị không phải 48 kHz), `AudioEncoder` (gom PCM thành frame 20 ms, khung im lặng → gói rỗng).
+   - `nanocast_win::audio::AudioSender`: WASAPI loopback của thiết bị output mặc định (định dạng mix của thiết bị, f32/i16/i32/u16) trên luồng riêng; mở thiết bị ngay trong luồng đó nên bật/tắt không chặn vòng video. `CastSession::set_audio(on)` + `CastConfig.audio`; `start.audio` mang trạng thái ban đầu, mỗi lần đổi gửi `audio {on}`. Tắt = thả stream cpal + luồng (không tốn CPU).
+   - GUI: checkbox **🔊 Âm thanh** (mặc định tắt, đổi được khi đang cast), dòng `Âm thanh  N kbps Opus` / `(im lặng)` / lỗi thiết bị.
+   - Receiver: `AudioPlayer.kt` (UDP 48324 → MediaCodec `audio/opus` với csd-0 OpusHead, csd-1/csd-2 → AudioTrack 16-bit, buffer dùng 80 ms, bắt đầu phát khi có 40 ms), xử lý `audio`/`start.audio`/`stop`, overlay dòng audio (kbps, buffer, trễ đầu ra, mất, bỏ, underrun).
+   - Đo (`docs/benchmark.md` *Phase 1b*): luồng encoder audio ~1,2–1,5 % một nhân; 12 lần bật/tắt trong 40 s, video giữ 59–61 fps; emulator nghe được nhạc, trễ đầu ra (track + mixer + HAL) ~100–125 ms.
+   - Chưa: TV thật (FAST track, trễ thật), đo lệch hình/tiếng (§7 ≤ 40 ms), chọn thiết bị output khác mặc định, đổi thiết bị mặc định giữa chừng (stream vẫn bám thiết bị cũ), PLC/FEC khi mất gói.
+   Tiếp theo: đo trên TV thật, cân chỉnh buffer theo `AudioTrack` FAST/HAL period của TV.

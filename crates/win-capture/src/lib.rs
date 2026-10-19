@@ -6,6 +6,8 @@
 //! `session::CastSession` wires everything together for the GUI; the modules are also
 //! usable one by one (the spike measures each stage).
 
+#[cfg(windows)]
+pub mod audio;
 pub mod convert;
 
 #[cfg(windows)]

@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Installer + portable zip
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The tag must match [workspace.package] version in Cargo.toml (v0.2.0 <-> 0.2.0).
+      - name: Check version
+        id: version
+        shell: pwsh
+        run: |
+          $version = $null
+          foreach ($line in Get-Content Cargo.toml) {
+            if ($line -match '^\s*version\s*=\s*"([^"]+)"') { $version = $Matches[1]; break }
+          }
+          $tag = $env:GITHUB_REF_NAME.TrimStart("v")
+          if ($version -ne $tag) { throw "Tag $env:GITHUB_REF_NAME does not match Cargo.toml version $version" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: cargo build --release
+        run: cargo build --release -p nanocast
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe not found" }
+          & $iscc "/DAppVersion=${{ steps.version.outputs.version }}" installer\nanocast.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+
+      - name: Portable zip
+        shell: pwsh
+        run: ./installer/make-portable.ps1 -NoBuild
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            installer/out/NANOCast-Setup-*.exe
+            installer/out/NANOCast-*-portable-win64.zip
+          if-no-files-found: error
+
+  android:
+    name: Android TV receiver APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - name: gradlew assembleDebug
+        working-directory: receiver-androidtv
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleDebug
+      - name: Rename APK
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          cp receiver-androidtv/app/build/outputs/apk/debug/app-debug.apk "dist/NANOCast-Receiver-${TAG#v}-androidtv.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist/*.apk
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: [windows, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.windows.outputs.version }}
+        run: |
+          ls -la dist
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "NANOCast $VERSION" \
+            --generate-notes

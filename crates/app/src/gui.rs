@@ -73,6 +73,8 @@ struct NanoApp {
 
     encoders: Result<Vec<String>, String>,
     settings: Settings,
+    /// System sound to the TV; off by default, can be toggled while casting.
+    audio: bool,
 
     cast: Option<ActiveCast>,
     message: Option<(String, bool)>,
@@ -103,6 +105,7 @@ impl NanoApp {
             show_window_picker: false,
             encoders: mf_encoder::hw_encoder_names().map_err(|e| format!("{e:#}")),
             settings: Settings { encoder: None, bitrate_mbps: 20, fps: 60 },
+            audio: false,
             cast: None,
             message: None,
         }
@@ -188,6 +191,7 @@ impl NanoApp {
             encoder: self.settings.encoder.clone(),
             pace_mbps: PACE_MBPS,
             sender_name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "NANOCast PC".into()),
+            audio: self.audio,
         };
         log::info!("cast {source_label} -> {} ({})", tv.info.name, cfg.video_addr);
         self.message = None;
@@ -296,9 +300,17 @@ impl NanoApp {
             }
         });
         ui.horizontal(|ui| {
-            let mut audio = false;
-            ui.add_enabled(false, egui::Checkbox::new(&mut audio, "Âm thanh"));
-            ui.weak("(chưa có — Phase 1b)");
+            let r = ui
+                .checkbox(&mut self.audio, "🔊 Âm thanh")
+                .on_hover_text("Gửi âm thanh của PC (mọi ứng dụng) lên TV. Bật/tắt được trong lúc cast.");
+            if r.changed() {
+                if let Some(c) = &self.cast {
+                    c.session.set_audio(self.audio);
+                }
+            }
+            if !casting {
+                ui.weak(if self.audio { "(bật khi bắt đầu cast)" } else { "(tắt)" });
+            }
         });
     }
 
@@ -485,8 +497,17 @@ fn stats_lines(s: &CastStats) -> Vec<String> {
         },
         None => lines.push("TV  không có kênh điều khiển (chỉ UDP)".into()),
     }
+    lines.push(audio_line(s));
     lines.push(format!("keyframe_request: {}   encoder: {}", s.keyframe_requests, short_encoder(&s.encoder)));
     lines
+}
+
+fn audio_line(s: &CastStats) -> String {
+    match (&s.audio_error, s.audio_on) {
+        (Some(e), _) => format!("Âm thanh  lỗi: {}", truncate(e, 48)),
+        (None, true) => format!("Âm thanh  {:>4.0} kbps Opus{}", s.audio_kbps, if s.audio_kbps < 8.0 { " (im lặng)" } else { "" }),
+        (None, false) => "Âm thanh  tắt".into(),
+    }
 }
 
 fn short_encoder(name: &str) -> String {
@@ -566,7 +587,15 @@ mod tests {
         let lines = stats_lines(&s);
         assert!(lines[0].contains("60 fps") && lines[0].contains("18.2 Mbps") && lines[0].contains("1920×1080"));
         assert!(lines[1].contains("chỉ UDP"));
-        assert!(lines[2].contains("keyframe_request: 2") && lines[2].contains("Intel Quick Sync Video"));
+        assert_eq!(lines[2], "Âm thanh  tắt");
+        assert!(lines[3].contains("keyframe_request: 2") && lines[3].contains("Intel Quick Sync Video"));
+        s.audio_on = true;
+        s.audio_kbps = 101.4;
+        assert_eq!(audio_line(&s), "Âm thanh   101 kbps Opus");
+        s.audio_kbps = 4.0;
+        assert!(audio_line(&s).ends_with("(im lặng)"));
+        s.audio_error = Some("no default audio output device".into());
+        assert!(audio_line(&s).contains("lỗi: no default"));
 
         s.receiver = Some(ReceiverReport {
             connected: true,

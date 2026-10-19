@@ -6,6 +6,9 @@ members = [
     "crates/spike-win",
     "crates/win-capture",
     "crates/spike-send",
+    "crates/receiver-desktop",
+    "crates/mac-capture",
+    "crates/linux-capture",
     "tools/icongen",
 ]
 

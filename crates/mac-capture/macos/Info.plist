@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template for NANOCast.app; bundle.sh replaces __VERSION__ and __EXECUTABLE__. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.redharegames.nanocast</string>
+	<key>CFBundleName</key>
+	<string>NANOCast</string>
+	<key>CFBundleDisplayName</key>
+	<string>NANOCast</string>
+	<key>CFBundleExecutable</key>
+	<string>__EXECUTABLE__</string>
+	<key>CFBundleIconFile</key>
+	<string>NANOCast</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__VERSION__</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>vi</string>
+	<!-- ScreenCaptureKit needs 12.3; system sound needs 13.0 (checked at run time). -->
+	<key>LSMinimumSystemVersion</key>
+	<string>12.3</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.education</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<!-- macOS 15+: Local Network privacy covers mDNS discovery and UDP/TCP to the TV. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>NANOCast tìm TV trong mạng LAN và gửi hình ảnh, âm thanh tới TV. / NANOCast finds TVs on your local network and streams your screen to them.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_nanocast._udp</string>
+	</array>
+</dict>
+</plist>
