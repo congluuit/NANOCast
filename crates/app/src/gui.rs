@@ -1999,7 +1999,7 @@ mod tests {
         let v = env!("CARGO_PKG_VERSION");
         assert_eq!(
             apk_url(),
-            format!("https://github.com/redharegames/NANOCast/releases/download/v{v}/NANOCast-Receiver-{v}-androidtv.apk")
+            format!("https://github.com/congluuit/NANOCast/releases/download/v{v}/NANOCast-Receiver-{v}-androidtv.apk")
         );
     }
 

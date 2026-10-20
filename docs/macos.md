@@ -132,7 +132,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 Lấy mã nguồn (hoặc `git pull` nếu đã có):
 
 ```bash
-git clone https://github.com/redharegames/NANOCast.git
+git clone https://github.com/congluuit/NANOCast.git
 ```
 
 ```bash

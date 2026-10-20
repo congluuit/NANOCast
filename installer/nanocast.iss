@@ -37,7 +37,7 @@
 
 #define AppName "NANOCast"
 #define AppExe "nanocast.exe"
-#define AppUrl "https://github.com/redharegames/NANOCast"
+#define AppUrl "https://github.com/congluuit/NANOCast"
 
 [Setup]
 ; Fixed AppId: keep it so upgrades replace the old install.
