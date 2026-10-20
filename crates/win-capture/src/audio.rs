@@ -213,7 +213,7 @@ where
 {
     let mut float = Vec::new();
     let stream = device.build_input_stream::<T, _, _>(
-        config.clone(),
+        *config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
             float.clear();
             float.extend(data.iter().map(|s| s.to_sample::<f32>()));

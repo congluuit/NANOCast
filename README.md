@@ -5,7 +5,7 @@
 Cast màn hình PC (hoặc đúng một ứng dụng) lên TV cùng mạng LAN, độ trễ thấp, dùng cho dạy học.
 Miễn phí, mã nguồn mở (MIT hoặc Apache-2.0), viết bằng Rust. Không tài khoản, không internet, không cài driver.
 
-- PC: `nanocast.exe` (Windows 10/11), một file ~7 MB, không cần quyền admin. macOS: cùng GUI (`crates/mac-capture`, [docs/macos.md](docs/macos.md)), đã viết và type-check nhưng chưa chạy trên Mac thật.
+- PC: `nanocast.exe` (Windows 10/11), một file ~7 MB, không cần quyền admin. macOS: cùng GUI (`crates/mac-capture`, [docs/macos.md](docs/macos.md)), bản cài `.dmg` universal (Intel + Apple Silicon), đã viết và type-check nhưng chưa chạy trên Mac thật ([Cài trên Mac](#cài-trên-mac)).
 - TV: app **NANOCast Receiver** cho Android TV / Google TV / box Android (`receiver-androidtv/`).
 
 Kế hoạch và giao thức: [PLAN.md](PLAN.md). Số đo và vấn đề đã gặp: [docs/benchmark.md](docs/benchmark.md).
@@ -19,6 +19,7 @@ Mọi bản phát hành ở [GitHub Releases](https://github.com/redharegames/NA
 | `NANOCast-Setup-<version>.exe` | Cài đặt bình thường (tiếng Việt / English). Mặc định cài cho riêng người dùng hiện tại vào `%LOCALAPPDATA%\Programs\NANOCast`, **không cần quyền admin**; chọn "cho mọi người dùng" thì cài vào Program Files (cần admin). Có shortcut Start Menu, tuỳ chọn Desktop, gỡ trong *Settings → Apps*. |
 | `NANOCast-<version>-portable-win64.zip` | Không muốn cài: giải nén, chạy `nanocast.exe` (chép USB mang theo được). |
 | `NANOCast-Receiver-<version>-androidtv.apk` | Cài lên TV / box Android: `adb install -r <file>.apk`, hoặc chép vào USB và mở bằng trình quản lý file trên TV (bật *Cho phép nguồn không xác định*). |
+| `NANOCast-<version>-macos-universal.dmg` | Mac (Intel và Apple Silicon), macOS 12.3+. Xem [Cài trên Mac](#cài-trên-mac). |
 
 Cài im lặng (triển khai cho cả phòng máy): `NANOCast-Setup-<version>.exe /VERYSILENT /TASKS=desktopicon`.
 
@@ -30,7 +31,29 @@ ISCC.exe installer\nanocast.iss
 powershell -ExecutionPolicy Bypass -File installer\make-portable.ps1 -NoBuild
 ```
 
-Kết quả nằm trong `installer/out/`. Phiên bản lấy từ `Cargo.toml` (`[workspace.package] version`). Phát hành: tăng version, push tag `v<version>`; workflow `release.yml` tự build installer, zip portable, APK và tạo GitHub Release.
+Kết quả nằm trong `installer/out/`. Phiên bản lấy từ `Cargo.toml` (`[workspace.package] version`). Phát hành: tăng version, push tag `v<version>`; workflow `release.yml` tự build installer, zip portable, APK, `.dmg` macOS và tạo GitHub Release.
+
+### Cài trên Mac
+
+> Bản Mac chưa được chạy thử trên Mac thật; nếu gặp lỗi, xin mở issue kèm phiên bản macOS và loại máy (Intel / Apple Silicon).
+
+Cần macOS 12.3 trở lên, Mac Intel hoặc Apple Silicon (M1/M2/M3/M4…).
+
+1. Tải `NANOCast-<version>-macos-universal.dmg` ở [GitHub Releases](https://github.com/redharegames/NANOCast/releases/latest), mở ra, kéo **NANOCast** vào **Applications**.
+2. Mở lần đầu: app chưa ký Developer ID nên macOS chặn. **Chuột phải** vào NANOCast trong Applications > **Open** > **Open** (chỉ một lần). macOS 15 trở lên: mở thử một lần, rồi vào *System Settings > Privacy & Security*, bấm **Open Anyway**. Hoặc chạy trong Terminal:
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/NANOCast.app
+   ```
+3. Cấp quyền ghi màn hình: *System Settings > Privacy & Security > Screen Recording* (macOS 15: *Screen & System Audio Recording*), bật **NANOCast**, rồi **thoát hẳn (Cmd+Q) và mở lại** app.
+4. macOS 15+: khi được hỏi quyền mạng cục bộ (Local Network), chọn **Allow**, nếu không sẽ không thấy TV.
+
+Tự đóng gói `.dmg` trên Mac (cần `xcode-select --install` và [rustup](https://rustup.rs)):
+
+```bash
+bash installer/macos/build-mac.sh
+```
+
+Kết quả: `installer/out/NANOCast-<version>-macos-universal.dmg` (thêm `--per-arch` để có bản riêng `-arm64` / `-x86_64`). Chi tiết, quyền và lỗi thường gặp: [docs/macos.md](docs/macos.md) mục 3a–3b.
 
 ## Build (PC)
 
@@ -67,33 +90,58 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 Mở app *NANOCast* trên TV; góc trái hiện IP của TV. Nên bật **Game Mode** trên TV để giảm trễ.
 
+Hướng dẫn đầy đủ (Game Mode từng hãng TV, bật Developer options, cài APK không cần PC, mẹo mạng, đo độ trễ bằng điện thoại): [docs/tv-setup.md](docs/tv-setup.md). Đăng lên Google Play: [docs/play-store.md](docs/play-store.md).
+
 **Mã 4 số (tuỳ chọn, mặc định tắt)**: bấm **OK** trên điều khiển TV để bật/tắt. Khi bật, góc dưới phải hiện `Mã / Code 1234`; PC phải nhập đúng mã mới cast được, và TV chỉ nhận hình/tiếng từ đúng PC đó (học sinh không cast đè được). Mã được nhớ qua các lần mở app; tắt rồi bật lại thì có mã mới.
 
 ## Cách dùng
 
-1. TV và PC cùng mạng (Wi-Fi/LAN). Mở app NANOCast trên TV.
-2. Mở `nanocast.exe`: TV tự hiện trong danh sách (mDNS). Không thấy? Bấm **Quét lại**, hoặc gõ IP của TV vào ô **IP của TV** rồi **Thêm** (mạng trường hay chặn mDNS).
-3. Chọn TV, rồi bấm:
-   - **Cast màn hình**: cả màn hình (có nhiều màn hình thì chọn trong ô bên cạnh).
-   - **Cast ứng dụng…**: chọn một cửa sổ (Chrome, PowerPoint…); chỉ cửa sổ đó lên TV, kể cả khi bị che. Menu bật ra là cửa sổ riêng nên không hiện; cần thấy menu thì dùng Cast màn hình.
-   TV có biểu tượng 🔒 thì TV đang bật mã 4 số: app hỏi mã đang hiện trên TV (nhập một lần, app nhớ cho lần sau). TV nhập tay mà đòi mã thì app cũng tự hỏi.
-4. **🔊 Âm thanh** (mặc định tắt): đánh dấu để gửi âm thanh của PC (mọi ứng dụng: video YouTube, PowerPoint…) lên loa TV; bỏ đánh dấu để tắt. Đổi được ngay trong lúc cast, hình không bị gián đoạn. Tắt thì PC không thu âm thanh nữa (không tốn CPU).
-5. **⏸ Tạm dừng**: TV giữ nguyên hình đang hiện (góc trên phải có dấu ⏸), PC ngừng chụp/mã hoá hình và ngừng gửi tiếng, để giáo viên làm việc riêng; bấm **▶ Tiếp tục** để chiếu lại. **⬛ Màn hình đen**: TV tô đen toàn bộ (học sinh tập trung nghe giảng); bấm lần nữa để hiện lại. Hai nút cần kênh điều khiển TCP (TV NANOCast nào cũng có).
-6. **Dừng** để ngừng. Đóng app cũng dừng cast.
+`nanocast.exe` dẫn từng bước, mỗi màn hình một việc; chữ to, không thuật ngữ. Lần đầu mở có **hướng dẫn 3 trang** (bấm **Bỏ qua** nếu đã quen; xem lại bằng nút **?** góc trên).
 
-Dòng trạng thái hiện fps, Mbps, thời gian encode phía PC, kbps âm thanh (~100 kbps khi có tiếng, ~4 kbps khi im lặng), số liệu TV gửi về (fps, gói mất, decode ms, số lần TV xin keyframe) và dòng **Bitrate N Mbps · F fps (lý do)**: bitrate/fps đang dùng và vì sao (theo cài đặt / giảm vì mất x% gói / giảm vì TV xin keyframe liên tục / giảm vì TV giải mã chậm / tăng lại, mạng đã ổn định).
+| 1. Chọn TV | 2. Chiếu gì | 3. Đang cast |
+|---|---|---|
+| ![Chọn TV](docs/screenshots/1-chon-tv.png) | ![Chiếu gì](docs/screenshots/2-chieu-gi.png) | ![Đang cast](docs/screenshots/3-dang-cast.png) |
 
-**Cài đặt** (lưu tự động trong `%APPDATA%\NANOCast\config.json`):
-- **Codec**: H.264 (mặc định) hoặc HEVC (nhẹ mạng hơn ở cùng chất lượng). HEVC chỉ dùng khi TV báo giải mã được (receiver Android có decoder HEVC); TV khác (receiver desktop, TV cũ) hoặc PC không có encoder HEVC thì app tự dùng H.264 và ghi rõ lý do trên dòng trạng thái.
-- **Encoder** phần cứng (mặc định *Tự động*: thử lần lượt theo thứ tự ưu tiên, bỏ qua cái không chạy), danh sách theo codec đang chọn.
-- **Bitrate** 10/20/30 Mbps + **Tự chỉnh theo mạng** (mặc định bật): TV báo mất gói > 1 %/s hoặc xin keyframe liên tục thì hạ bậc 30 → 20 → 15 → 10 Mbps (dưới 15 Mbps thì 30 fps), 10 s ổn định thì tăng lại từng bậc, không vượt bitrate đã chọn.
-- **Khung hình** 30/60 fps.
-- **Tự cast lại khi mở app**: mở app là cast màn hình tới TV dùng lần trước ngay khi thấy TV đó (chờ tối đa 20 s). App luôn nhớ TV cuối, bitrate, fps, encoder, codec, âm thanh.
-- **Ngôn ngữ**: Tiếng Việt / English (mặc định theo ngôn ngữ của Windows).
+1. **Chọn TV.** TV và máy tính cùng mạng Wi-Fi/LAN; mở app NANOCast trên TV. TV tự hiện thành thẻ (app luôn tìm, không cần bấm gì):
+   - **Nhanh nhất · cần app NANOCast**: TV / box Android hoặc PC đang chạy app NANOCast (receiver). TV phải cài app này (APK) mới hiện ở đây và mới thêm được bằng địa chỉ IP. Nút **Tải app NANOCast cho TV (APK)** ngay dưới danh sách (và trong hướng dẫn lần đầu) tải đúng file `NANOCast-Receiver-<version>-androidtv.apk` của phiên bản đang dùng từ GitHub Releases; chép vào USB rồi mở trên TV, hoặc tải thẳng trên TV bằng app Downloader (xem [docs/tv-setup.md](docs/tv-setup.md)).
+   - **Không cần cài, hơi trễ**: TV có sẵn Chromecast (Google TV, Android TV, Chromecast). Loa Google Home / Nest không hiện.
+   - Không thấy TV? Bấm **TV của tôi không hiện?**: 3 điều cần kiểm tra và ô gõ địa chỉ IP đang hiện trên TV (mạng trường hay chặn việc tự tìm).
+2. **Chiếu gì.** Hai nút lớn: **Toàn màn hình** (có nhiều màn hình thì chọn ở ô *Màn hình*) hoặc **Một ứng dụng** (danh sách cửa sổ đang mở, tên dễ hiểu: PowerPoint, Google Chrome…; cửa sổ hệ thống đã được lọc bỏ). Chỉ cửa sổ đó lên TV, kể cả khi bị che; menu bật ra là cửa sổ riêng nên không hiện, cần thấy menu thì chọn Toàn màn hình. Công tắc **Âm thanh** (mặc định tắt) gửi tiếng của máy tính (YouTube, PowerPoint…) ra loa TV.
+   TV đang bật **mã 4 số** (thẻ có ổ khoá, *Cần mã trên TV*): app hỏi mã đang hiện trên TV bằng một ô số lớn; nhập một lần, app nhớ cho lần sau.
+3. **Đang cast lên &lt;TV&gt;.** Thanh trạng thái bằng lời: *Tốt* / *Mạng yếu, đang giảm chất lượng* / *Mất kết nối* / *Đang tạm dừng* / *Màn hình đen*. Ba nút lớn:
+   - **Tạm dừng**: TV giữ hình đang hiện, máy tính ngừng gửi hình và tiếng (giáo viên làm việc riêng); **Tiếp tục** để chiếu lại. Phím tắt toàn cục **Ctrl+Shift+P** (dùng được cả khi cửa sổ đang ẩn).
+   - **Màn hình đen**: TV tô đen (học sinh tập trung nghe giảng); **Hiện lại** để chiếu tiếp.
+   - **Dừng**: ngừng cast, quay về bước 2.
 
-Hạn chế hiện tại: âm thanh lấy từ thiết bị phát mặc định của Windows (đổi thiết bị mặc định khi đang cast thì bỏ chọn rồi chọn lại **Âm thanh**); cần encoder phần cứng (Intel Quick Sync, NVIDIA, AMD) qua Media Foundation; nội dung có DRM (Netflix…) sẽ đen; Windows 10 luôn có viền vàng quanh vùng đang cast.
+   **Đổi nội dung chiếu** quay về bước 2 mà không dừng; công tắc Âm thanh đổi được ngay khi đang cast. Số liệu kỹ thuật (fps, Mbps, encode/decode ms, gói mất, bitrate và lý do, bộ mã hoá, xử lý hình) nằm trong **Chi tiết**.
 
-Thử không cần TV: `cargo run -p nanocast-core --example advertise -- "TV thử"` quảng bá một TV giả để xem danh sách trong app.
+**Khi có sự cố**, app nói bằng lời kèm cách sửa, mã lỗi kỹ thuật chỉ nằm trong *Chi tiết*:
+- Mất kết nối với TV (Wi-Fi rớt, tắt app trên TV): *Mất kết nối, tự thử lại sau 10 giây*, có nút **Thử lại ngay**; TV quay lại là tự chiếu tiếp. Thử 6 lần (~1,5 phút) không được thì dừng và ghi các bước kiểm tra.
+- Gõ IP sai: *Địa chỉ chưa đúng. Ví dụ: 192.168.1.20*. Mã sai: *Mã chưa đúng, hãy xem lại trên TV*.
+- Không mã hoá / không lấy được hình: nói rõ và gợi ý đổi Bộ mã hoá hoặc chọn Toàn màn hình.
+- Chromecast chưa cast được (bản hiện tại chưa hỗ trợ TV đó): gợi ý cài app NANOCast lên TV.
+
+**Khay hệ thống (Windows)**: đóng cửa sổ khi đang cast thì app *không* thoát mà thu xuống khay (góc dưới phải), vẫn cast. Bấm đúp biểu tượng để mở lại; chuột phải: **Mở NANOCast**, **Tạm dừng / Tiếp tục**, **Dừng cast**, **Thoát**. Không cast thì đóng cửa sổ là thoát. macOS/Linux: đóng cửa sổ khi đang cast chỉ thu nhỏ.
+
+**Cài đặt** (nút bánh răng; lưu tự động trong `%APPDATA%\NANOCast\config.json`):
+
+![Cài đặt](docs/screenshots/4-cai-dat.png)
+
+- **Ngôn ngữ**: Tiếng Việt (mặc định) / English.
+- **Chất lượng hình**: **Tự động** (20 Mbps, 60 fps, tự chỉnh theo mạng; nên dùng), **Nét** (30 Mbps, 30 fps: chữ nhỏ rõ hơn, hợp tài liệu), **Mượt** (10 Mbps, 60 fps: hợp Wi-Fi yếu).
+- **Tự cast lại khi mở NANOCast**: mở app là chiếu màn hình lên TV dùng lần trước ngay khi thấy TV đó (chờ tối đa 20 s). App luôn nhớ TV cuối và mã của nó.
+- **Xem lại hướng dẫn**.
+- **Nâng cao**:
+  - **Codec** H.264 (mặc định) hoặc HEVC (nhẹ mạng hơn). HEVC chỉ dùng khi TV báo giải mã được; nếu không app tự dùng H.264 và ghi lý do trong Chi tiết.
+  - **Bộ mã hoá** phần cứng (mặc định *Tự động*: thử lần lượt, bỏ qua cái không chạy).
+  - **Bitrate** 10/20/30 Mbps + **Tự chỉnh theo mạng**: TV báo mất gói > 1 %/s hoặc xin keyframe liên tục thì hạ 30 → 20 → 15 → 10 Mbps (dưới 15 Mbps thì 30 fps), 10 s ổn định thì tăng lại. **Khung hình** 30/60 fps. Chọn khác ba mức ở trên thì phần Chất lượng ghi *thiết lập riêng*.
+  - **Xử lý hình** (Windows) Tự động / Card đồ hoạ / CPU và **Bỏ qua khung hình không đổi**.
+
+Giao diện sáng/tối theo hệ thống (`NANOCAST_THEME=light|dark` để ép). Chữ dùng font **Be Vietnam Pro** nhúng sẵn (đủ dấu tiếng Việt, giấy phép SIL OFL 1.1, xem [assets/fonts/OFL.txt](assets/fonts/OFL.txt)).
+
+Hạn chế hiện tại: âm thanh lấy từ thiết bị phát mặc định của Windows (đổi thiết bị mặc định khi đang cast thì tắt rồi bật lại **Âm thanh**); cần encoder phần cứng (Intel Quick Sync, NVIDIA, AMD) qua Media Foundation; nội dung có DRM (Netflix…) sẽ đen; Windows 10 luôn có viền vàng quanh vùng đang cast; Chromecast không có Tạm dừng / Màn hình đen.
+
+Thử không cần TV: `cargo run -p nanocast-core --example advertise -- "TV thử"` quảng bá một TV giả để xem danh sách trong app, hoặc chạy `nanocast-receiver --windowed` trên cùng máy.
 
 ## Receiver desktop (PC cũ / mini PC / Raspberry Pi cắm HDMI vào TV, máy chiếu)
 
@@ -136,7 +184,7 @@ cargo build --release -p nanocast-receiver
 
 | Thư mục | Nội dung |
 |---|---|
-| `crates/app` | `nanocast.exe`: GUI egui |
+| `crates/app` | `nanocast.exe`: GUI egui 3 bước (`gui.rs`), icon/nút vẽ tay (`widgets.rs`), Chromecast (`chromecast.rs`), khay hệ thống + Ctrl+Shift+P (`tray.rs`), chuỗi VI/EN (`i18n.rs`) |
 | `crates/win-capture` | `nanocast-win`: capture WGC → NV12 → Media Foundation H.264/HEVC → UDP, bitrate thích nghi, âm thanh WASAPI loopback → Opus |
 | `crates/mac-capture` | `nanocast-mac`: sender macOS (ScreenCaptureKit → VideoToolbox H.264), cùng API, chưa kiểm chứng |
 | `crates/linux-capture` | `nanocast-linux`: sender Linux (portal/PipeWire hoặc X11 → FFmpeg/OpenH264 H.264 → UDP), chưa kiểm chứng |

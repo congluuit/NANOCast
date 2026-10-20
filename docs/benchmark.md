@@ -372,3 +372,124 @@ Mỗi lần mở lại encoder: khoảng 0,5 s bitrate thấp (khung đầu IDR)
 - Bấm thử GUI bằng tay: hộp nhập mã (gửi tin nhắn chuột giả vào cửa sổ egui không có tác dụng nên chưa tự động hoá được), "Tự cast lại khi mở app", đổi ngôn ngữ, lưu `config.json` sau khi đổi cài đặt.
 - TV/box Android thật (HEVC phần cứng thật, mã 4 số với remote thật), Wi-Fi thật cho bitrate thích nghi (mất gói thật, không phải receiver giả), NVIDIA/AMD MFT có áp dụng `MeanBitRate` lúc chạy hay không (code tự kiểm tra và mở lại encoder nếu không).
 - So sánh chất lượng HEVC với H.264 ở cùng bitrate; HEVC trên macOS (chưa làm).
+
+## 2026-10-19 — Kiểm tra receiver Android
+
+Máy dev và emulator như các mục trên (`NANOCast-test-API35`, x86_64, `c2.goldfish.*`, 1920×1080). APK debug mới build (`gradlew.bat assembleDebug`, 0,97 MB), cài bằng `adb install -r`; video bằng `spike-send` build `x86_64-linux-android` chạy trong emulator tới 127.0.0.1 (luồng `spike-win`, 12 s, ~20 Mbps, lặp), control bằng `ctrl_probe` qua `adb forward tcp:48323`. Lưu ý Git Bash trên Windows đổi `/data/...` thành `C:/Program Files/Git/data/...`: đặt `MSYS_NO_PATHCONV=1` khi gọi adb.
+
+| Thử | Kết quả |
+|---|---|
+| Hình H.264 | `c2.goldfish.h264.decoder` 1920×1080, 59–62 fps, 20 Mbps, 0 gói mất mới, 0 lỗi decoder; ảnh chụp emulator khớp màn hình PC lúc quay |
+| Overlay | Hiện IP (10.0.2.15, 10.0.2.16) + cổng udp/tcp/audio, mDNS, trạng thái ctrl (tên + IP máy gửi, độ phân giải, codec, audio off, kf req), decoder, fps in/out, Mbps, gói mất, frame bỏ, decode ms (avg/p95 + session), dòng âm thanh, gợi ý bấm OK, codecs `h264,hevc` |
+| `pause on` | Hình đứng yên (không render), biểu tượng ⏸ cam góc trên phải; `pause off` chạy tiếp |
+| `blank on` | Toàn màn hình đen (đè cả overlay); `blank off`: hình về ở keyframe kế tiếp |
+| Bấm OK (`KEYCODE_DPAD_CENTER`) | Bật mã 4 số, hiện `Mã / Code ####` góc dưới phải; bấm lại: tắt |
+| Mã bật, `hello` không mã | `Error bad_pin` rồi đóng kết nối |
+| Mã bật, `hello` mã sai (0000) | `Error bad_pin`, đóng kết nối; sau đó UDP vẫn tới nhưng receiver `fps 0.0` (bỏ qua) |
+| Mã bật, `hello` đúng mã | `Caps`, stats 60 fps, hình chạy |
+| Mã tắt lại, `hello` không mã | Được nhận (`Caps`) |
+| Release APK (`assembleRelease`, ký khoá debug) | Cài đè và mở được, tiến trình chạy |
+
+Số quan sát (phiên ~60 s, cả khi `pause`/`blank` thay phiên): decode ms session p50 10,2 / p95 44–54 / p99 ~110 (emulator, đầu phiên có backlog khởi động); cửa sổ 5 s thường avg 9–17 ms.
+
+Cạm bẫy khi thử: đã có hai tiến trình `spike-send` chạy cùng lúc (một lệnh chạy lại) → hai luồng seq trộn nhau, `lost_pkts` nhảy tới ~22 000 và fps dao động. Sau khi `pkill spike-send` và chỉ chạy một sender, `lost_pkts` đứng yên. Không phải lỗi receiver.
+
+Không phát hiện lỗi cần sửa trong `receiver-androidtv/` (chỉ đổi cấu hình build, xem dưới).
+
+### Release / Play Store
+- `app/build.gradle.kts`: `release` đọc khoá từ `receiver-androidtv/keystore.properties` (đã `.gitignore`) hoặc biến môi trường `NANOCAST_KEYSTORE`, `NANOCAST_KEYSTORE_PASSWORD`, `NANOCAST_KEY_ALIAS`, `NANOCAST_KEY_PASSWORD`; không có thì ký bằng khoá debug. `isMinifyEnabled = false`. `versionName` đổi từ `0.1.0-spike` sang `0.1.0`.
+- `gradlew.bat assembleDebug bundleRelease assembleRelease`: build thành công. `.aab` ~0,72 MB, APK release ~0,72 MB. Đã thử ký `.aab` bằng keystore tạm qua biến môi trường: `jarsigner -verify` báo `jar verified`.
+- Hướng dẫn: [play-store.md](play-store.md), [tv-setup.md](tv-setup.md).
+
+### Chưa kiểm chứng
+- TV/box Android thật (Game Mode, decoder HW thật, remote thật bấm OK), đường tải APK bằng Downloader, các bước menu từng hãng TV trong `tv-setup.md` (viết theo hiểu biết chung về các hãng, chưa thử trên máy thật).
+- Upload `.aab` lên Play Console (chưa có tài khoản/keystore thật), ảnh chụp 1920×1080 cho store chưa tạo.
+- Image emulator Android TV (đang dùng image điện thoại với profile `tv_1080p`).
+
+## 2026-10-20 — Phase 1: zero-copy GPU (BGRA→NV12 trên GPU, texture thẳng vào MFT) + bỏ khung không đổi
+
+Mã: `crates/win-capture/src/gpu.rs` (mới), `capture.rs`, `mf_encoder.rs`, `session.rs`; đo bằng `crates/win-capture/examples/pipeline_bench.rs`, thử encoder bằng `examples/nv_probe.rs`.
+
+### Pipeline mới
+- **Một device duy nhất**: dùng chính D3D11 device của windows-capture (bật `ID3D11Multithread::SetMultithreadProtected`). Trên luồng capture: `TileHasher` (compute shader `cs_5_0`, hash 32 bit cho mỗi ô 64×64, đọc về ~2 KB/khung 1080p) → nếu có thay đổi, `ID3D11VideoProcessor` đổi BGRA → NV12 BT.709 limited range, co giãn + viền đen về kích thước encoder, ghi thẳng từ texture WGC vào một pool 5 texture NV12 (không copy BGRA, không đọc về RAM). Texture NV12 được giữ chỗ bằng `GpuFrame` (thả = trả lại pool) cho tới khi encoder trả output.
+- Encoder: `IMFDXGIDeviceManager` (`MFCreateDXGIDeviceManager` + `ResetDevice`) gửi bằng `MFT_MESSAGE_SET_D3D_MANAGER` **trước** khi đặt media type, chỉ khi MFT báo `MF_SA_D3D11_AWARE`; sample tạo bằng `MFCreateDXGISurfaceBuffer`. MFT không D3D-aware hoặc lỗi khi nhận manager → mở lại với input RAM.
+- **Tự chọn + fallback**: không có video processor BGRA→NV12, encoder không nhận texture, lỗi lúc chạy, hoặc capture→encoded > 60 ms trong 1,5 s → chuyển hẳn sang đường CPU cũ (rayon) và mở lại encoder. Ép bằng biến môi trường `NANOCAST_CONVERT=gpu|cpu` (mặc định auto); `NANOCAST_SKIP_STATIC=0` tắt bỏ khung. *(Chưa có ô trong Cài đặt GUI: `crates/app` dùng chung `CastConfig` với Linux/macOS nên chưa thêm trường.)*
+- **Bỏ khung không đổi**: khung có hash giống khung trước thì không convert/encode/gửi (đường CPU cũng dùng hash GPU để khỏi đọc về RAM; nếu shader không chạy thì so sánh BGRA trên CPU). Không có khung mới sau **1 s** thì session encode lại khung cuối (TV giữ đồng hồ/timeout). Khung bị bỏ ở đâu đó (hàng đợi đầy, pause) → khung kế tiếp luôn được gửi dù giống, để thay đổi cuối cùng không bị kẹt.
+- `CastStats` thêm `gpu_convert`, `frames_unchanged`, `frames_repeated`; `convert_ms` = thời gian CPU trên luồng capture cho mỗi khung (hash + video processor, hoặc đọc về + convert).
+
+### Cách đo
+`cargo run --release -p nanocast-win --example pipeline_bench -- --scene motion|static [--cores 2 --skip-cpus 16]`: một `CastSession` thật (cửa sổ 1280×720 → canvas 1920×1080, 60 fps, 20 Mbps, QSV H.264) gửi UDP tới socket cục bộ; cửa sổ test do **tiến trình con** vẽ (không tính vào CPU). CPU = `GetProcessTimes` (user + kernel) của tiến trình sender trong 10 s sau 2 s khởi động, tính theo % **một** nhân. *motion*: toàn bộ cửa sổ đổi mỗi ~16 ms (sọc màu chạy + chữ, trường hợp xấu nhất); *static*: vẽ một lần. "Trước" = `NANOCAST_CONVERT=cpu NANOCAST_SKIP_STATIC=0` (đúng pipeline cũ), "sau" = mặc định (GPU + bỏ khung). Máy: i9-13900HX (8P+16E, 32 luồng), Intel UHD (màn hình) + RTX 4050 Laptop, Win10 19045.
+
+| Kịch bản | Đường | CPU (% 1 nhân) | Khung gửi/s | Mbps | convert | encode | capture→encoded |
+|---|---|---|---|---|---|---|---|
+| motion, 32 luồng | CPU, không bỏ khung (trước) | 106 % | 61,0 | 20,3 | 2,44 ms | 12,6 ms | 15,7 ms |
+| | CPU + bỏ khung | 90 % | 56,1 | 18,7 | 2,95 ms | 12,6 ms | 16,1 ms |
+| | GPU, không bỏ khung | 19 % | 57,9 | 20,3 | 0,25 ms | 12,0 ms | 12,4 ms |
+| | **GPU + bỏ khung (sau)** | **13 %** | 56,0 | 18,7 | 0,90 ms | 12,3 ms | **13,3 ms** |
+| static, 32 luồng | CPU, không bỏ khung (trước) | 107 % | 57,7 | 20,3 | 2,30 ms | 12,6 ms | 15,5 ms |
+| | CPU + bỏ khung | 3,4 % | 1,0 (lặp) | 0,00 | — | 15,3 ms | 15,8 ms |
+| | GPU, không bỏ khung | 20 % | 57,7 | 20,3 | 0,21 ms | 12,2 ms | 12,5 ms |
+| | **GPU + bỏ khung (sau)** | **1,9 %** | 1,1 (lặp) | **0,01** | — | 15,5 ms | 15,6 ms |
+| motion, 2 nhân E (CPU 16–17) | CPU, không bỏ khung (trước) | 78 % | 60,7 | 20,3 | 5,72 ms | 13,1 ms | 19,5 ms |
+| | CPU + bỏ khung | 76 % | 55,3 | 18,5 | 6,56 ms | 13,2 ms | 20,5 ms |
+| | GPU, không bỏ khung | 17,5 % | 60,8 | 20,2 | 0,35 ms | 12,6 ms | 13,0 ms |
+| | **GPU + bỏ khung (sau)** | **19,5 %** | 50,8 | 17,5 | 1,17 ms | 12,9 ms | **14,2 ms** |
+| static, 2 nhân E | CPU, không bỏ khung (trước) | 80 % | 57,5 | 20,2 | 5,69 ms | 12,9 ms | 19,3 ms |
+| | CPU + bỏ khung | 2,2 % | 1,0 (lặp) | 0,00 | — | 14,8 ms | 15,6 ms |
+| | GPU, không bỏ khung | 13,6 % | 57,7 | 20,2 | 0,35 ms | 12,7 ms | 13,1 ms |
+| | **GPU + bỏ khung (sau)** | **5,2 %** | 1,1 (lặp) | **0,01** | — | 15,6 ms | 15,6 ms |
+
+*Mbps = byte UDP thực nhận ở socket. Ở motion, "bỏ khung" vẫn bỏ được 45–73 khung/10 s vì cửa sổ test vẽ chậm hơn nhịp capture. Ở static, khung gửi là khung lặp mỗi giây (convert không tính vì không có khung mới).*
+
+### Nhận xét
+- **CPU giảm 5–8 lần khi có chuyển động** (106 → 13–19 % một nhân ở 1080p60; trên 2 nhân E từ 78 → 18–20 %), capture→encoded giảm ~3 ms (máy mạnh) đến ~6 ms (2 nhân E). Trên máy yếu thật phần convert CPU sẽ còn lớn hơn (5,7 ms trên 2 nhân E so với 2,4 ms trên 32 luồng), nên lợi ích còn lớn hơn.
+- **Màn hình tĩnh gần như không tốn gì**: 1,9–5,2 % một nhân và ~10 kbps, thay vì ~100 % CPU và **20 Mbps** — WGC vẫn giao ~58 khung/s cho cửa sổ đứng yên và QSV ở CBR độn bitrate lên đủ 20 Mbps cho các khung giống hệt; bỏ khung giải phóng gần hết băng thông Wi-Fi của lớp học.
+- Giá của hash GPU: ~0,6 ms mỗi khung trên luồng capture (chờ GPU đọc về ~2 KB), CPU gần như không đổi.
+- Encode ~12–13 ms là của QSV (như Spike 1), không phụ thuộc đường input; khung lặp tĩnh encode ~15 ms (iGPU hạ xung khi rảnh).
+
+### Bẫy khi giả lập máy yếu bằng affinity
+Ghim tiến trình vào CPU 0–1 hoặc 2–3 (hai luồng HT của **một** nhân P trên CPU lai Intel) làm tiến trình gần như không được lập lịch: cả đường CPU lẫn GPU tụt còn 9–14 khung/s, capture→encoded 100–370 ms mà tiến trình chỉ dùng ~1 nhân (lần chạy đầu ở CPU 0–1 thì đường CPU lại bình thường, 61 khung/s — không ổn định). Ghim vào 2 hoặc 4 nhân E (CPU 16+, mỗi CPU một nhân vật lý) thì ổn định → các số trên dùng `--cores 2 --skip-cpus 16`. Watchdog 60 ms vẫn được giữ để tự về đường CPU nếu một driver làm đường GPU chậm.
+
+Thiết kế đầu tiên (thiết bị D3D riêng có `VIDEO_SUPPORT`, chép khung WGC sang vòng texture chia sẻ keyed mutex) chạy tốt ở 32 luồng (12 % CPU) nhưng `AcquireSync` thỉnh thoảng chờ 20–30 ms và tốn thêm một lần copy BGRA; đã bỏ để dùng chung device của capture.
+
+### NVIDIA MFT (Optimus) thử lại
+`examples/nv_probe.rs`: với mỗi adapter liệt kê encoder bằng `MFTEnum2` + `MFT_ENUM_ADAPTER_LUID` rồi mở (a) kèm D3D manager trên device của adapter đó và đưa texture NV12, (b) không manager, đưa RAM.
+| Encoder | Kết quả |
+|---|---|
+| Intel QSV (`MFTEnumEx` và `MFTEnum2` LUID iGPU) | (a) và (b) đều chạy, 30/30 khung, 17–19 ms |
+| NVIDIA H.264 Encoder MFT (`MFTEnumEx`) | `ActivateObject` và `CoCreateInstance` đều `0x8000FFFF` (E_UNEXPECTED) |
+| NVIDIA, `MFTEnum2` theo LUID của RTX 4050 (driver báo 2 LUID, thử cả hai) | (a) và (b) đều `0x8000FFFF` ngay ở `ActivateObject`/`CoCreateInstance` |
+
+D3D manager chỉ gửi được **sau** khi có `IMFTransform`, nên không thể là nguyên nhân: MFT NVIDIA hỏng từ bước tạo object trên máy này kể cả khi gắn đúng adapter. Giữ cách cũ (thử lần lượt, bỏ qua cái lỗi). Nghi do driver/Optimus (màn hình nối iGPU); chưa thử NVENC SDK trực tiếp.
+
+### Kiểm tra end-to-end
+- `cargo build --release`, `cargo test` (thêm test GPU `video_processor_matches_cpu_levels_and_letterbox`: nguồn trắng 4:3 → Y = 235, viền Y = 16 / UV = 128, khớp đường CPU; texture được trả khi thả `GpuFrame`), `cargo clippy` sạch cho `nanocast-win`, `spike-win`.
+- `nanocast-receiver --windowed --on-top --overlay` + `nanocast.exe` (tự cast lại, màn hình 1) trên cùng máy: log "NV12 on the GPU", receiver hiện hình đúng màu, overlay **57 fps, 0 gói mất, decode 4 ms, 28,9 Mbps**. `pipeline_bench --to 127.0.0.1:48322` (cửa sổ 1266×713 co giãn vào 1920×1080) cũng hiện đúng trên receiver.
+
+### Chưa kiểm chứng
+- Máy yếu thật (Intel iGPU đời 2015, Celeron 2 nhân), GPU AMD/NVIDIA làm encoder với input texture, Windows 11.
+- Đổi cỡ cửa sổ khi đang cast trên đường GPU (video processor được tạo lại theo kích thước mới — đã viết, chưa thử tay), màn hình > 1080p co về 1080p bằng video processor, HDR/màn hình 10 bit.
+- Ô chọn GPU/CPU trong Cài đặt GUI (hiện chỉ có biến môi trường).
+
+## 2026-10-20 — Phase 4: Google Cast (`nanocast-cast`), Chromecast có sẵn trong TV
+
+Máy thử: laptop Intel UHD + RTX 4050 (encoder dùng được: Intel QSV, input texture D3D11), Wi-Fi "Public". Thiết bị Cast trên mạng: chỉ có **Google Nest Mini** (loa, không màn hình); TV Android của người dùng không bật lúc thử.
+
+### Đường A trong Chrome trên PC (`examples/cast_preview`, `http://127.0.0.1:47901/`)
+| Đo | Kết quả |
+|---|---|
+| Hình | 1920×1080, H.264 Main QSV, GPU NV12, 55–61 khung/s khi màn hình chuyển động, 8–12 Mbps (CBR 12 Mbps) |
+| Tiếng | AAC-LC 48 kHz stereo trong fMP4, Chrome decode đều (~100 kbps khi im lặng) |
+| Độ trễ bộ đệm Chrome (`buffered.end − currentTime`) | **2,27–2,29 s**, đứng yên sau 10 s, 70 s, 100 s |
+| Khung rớt (`getVideoPlaybackQuality`) | 0 / 3867 (một lần 1 ngay lúc mở trang) |
+| Khởi động | init segment sẵn sàng < 1 s sau khi chạy (keyframe đầu tiên) |
+
+Seek tới gần cuối bộ đệm để giảm trễ: trình phát lùi về 9 s và kẹt ở `HAVE_FUTURE_DATA` → không dùng. Trễ thực tế đường A trên TV = khoảng 2–3 s + mạng (chưa đo).
+
+### Kênh Cast v2 trên Nest Mini (`examples/cast_tv`, tắt tiếng)
+- mDNS tìm thấy sau ~1–4 s; TLS 1.2; kết nối + LAUNCH Default Media Receiver: **2,5 s** tới khi LOAD được trả lời.
+- LAUNCH mirroring `0F5096E8` → `LAUNCH_ERROR SYSTEM_ERROR` (loa) → tự lùi về đường A trong < 0,1 s.
+- LOAD → `LOAD_FAILED` sau ~10 s, không có kết nối HTTP nào tới PC: Wi-Fi ở chế độ Public nên tường lửa chặn cổng 47900 (có thể loa cũng không nhận `video/mp4`). Phiên báo lỗi tường lửa bằng tiếng Việt như thiết kế.
+
+### Chưa kiểm chứng
+- Hình thật trên TV Chromecast/Google TV qua cả hai đường; độ trễ đường B (mục tiêu 0,1–0,4 s, `targetDelay` 300 ms); 1080p60 trên receiver Cast; chạy 90 phút; mất gói thật.

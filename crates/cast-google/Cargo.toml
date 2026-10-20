@@ -1,0 +1,33 @@
+[package]
+name = "nanocast-cast"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "NANOCast fallback: cast to the Google Cast (Chromecast built-in) receiver every TV already has, nothing to install on the TV"
+
+[dependencies]
+nanocast-core.workspace = true
+anyhow.workspace = true
+log.workspace = true
+mdns-sd = "0.21"
+# ring: no CMake / NASM needed (aws-lc-rs would).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+prost = "0.13"
+serde_json = "1"
+aes = "0.8"
+ctr = "0.9"
+getrandom = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+nanocast-win.workspace = true
+cpal = "0.18"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Variant",
+    "Win32_Graphics_Direct3D11",
+] }
+
+[dev-dependencies]
+env_logger.workspace = true

@@ -381,6 +381,7 @@ fn main() -> Result<()> {
                 // Keyframes only on request (or --keyframe-every) once intra refresh works.
                 gop_frames: args.fps * 10,
                 encoder_index: args.encoder.unwrap_or(0),
+                d3d: None,
             };
             let enc = match args.encoder {
                 Some(_) => MfEncoder::new(&cfg)?,

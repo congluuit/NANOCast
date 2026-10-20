@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use nanocast_core::protocol::{VideoCodec, CONTROL_PORT, VIDEO_PORT};
 use nanocast_win::capture::Source;
-use nanocast_win::session::{CastConfig, CastSession, Phase};
+use nanocast_win::session::{CastConfig, CastSession, ConvertPath, Phase};
 use nanocast_win::sources;
 
 fn main() -> Result<()> {
@@ -64,6 +64,8 @@ fn main() -> Result<()> {
         pace_mbps: 80,
         sender_name: "cast_toggle".into(),
         audio: false,
+        convert: ConvertPath::Auto,
+        skip_static: true,
     });
     let start = Instant::now();
     let mut on = false;

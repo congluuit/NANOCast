@@ -10,6 +10,7 @@ use log::{debug, info, warn};
 use nanocast_core::protocol::VideoCodec;
 use windows::core::{Interface, GUID, PWSTR};
 use windows::Win32::Foundation::VARIANT_TRUE;
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -26,6 +27,10 @@ pub struct EncoderConfig {
     pub gop_frames: u32,
     /// Index into `list_hw_encoders(codec)` (used by `MfEncoder::new`).
     pub encoder_index: usize,
+    /// DXGI device manager for GPU input (`submit_texture`). Encoders that are not
+    /// D3D11-aware, or refuse the manager, are opened for system-memory input instead
+    /// (`MfEncoder::gpu_input` tells which).
+    pub d3d: Option<IMFDXGIDeviceManager>,
 }
 
 pub struct EncodedFrame {
@@ -42,6 +47,8 @@ struct Inflight {
     pts_hns: i64,
     submitted: Instant,
     capture_instant: Instant,
+    /// Texture slot of the input (GPU input), busy until this frame's output came out.
+    slot: Option<usize>,
 }
 
 pub struct MfEncoder {
@@ -57,6 +64,8 @@ pub struct MfEncoder {
     debug: bool,
     pub name: String,
     pub video_codec: VideoCodec,
+    /// Takes D3D11 textures (`submit_texture`) rather than system memory (`submit`).
+    pub gpu_input: bool,
 }
 
 /// COM (multithreaded) + Media Foundation for the current thread, undone on drop.
@@ -149,27 +158,58 @@ pub fn list_hw_encoders(codec: VideoCodec) -> Result<Vec<(String, IMFActivate)>>
             &mut count,
         )
         .context("MFTEnumEx")?;
-        let mut result = Vec::new();
-        if !pp.is_null() {
-            let slice = std::slice::from_raw_parts_mut(pp, count as usize);
-            for slot in slice.iter_mut() {
-                // Take ownership so each IMFActivate is released exactly once.
-                let Some(act) = slot.take() else { continue };
-                let mut name = PWSTR::null();
-                let mut len = 0u32;
-                let friendly = if act.GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut name, &mut len).is_ok() {
-                    let s = name.to_string().unwrap_or_default();
-                    CoTaskMemFree(Some(name.0 as _));
-                    s
-                } else {
-                    "<unnamed>".to_string()
-                };
-                result.push((friendly, act));
-            }
-            CoTaskMemFree(Some(pp as _));
-        }
-        Ok(result)
+        Ok(take_activates(pp, count))
     }
+}
+
+/// Like `list_hw_encoders`, but only the MFTs of the GPU with this adapter LUID
+/// (`MFTEnum2` + `MFT_ENUM_ADAPTER_LUID`, Windows 10 1703+). The activates are bound to
+/// that adapter, which matters on hybrid laptops where the default one is the iGPU.
+pub fn list_hw_encoders_on(codec: VideoCodec, adapter_luid: u64) -> Result<Vec<(String, IMFActivate)>> {
+    unsafe {
+        let out_info = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: subtype(codec) };
+        let mut attrs = None;
+        MFCreateAttributes(&mut attrs, 1)?;
+        let attrs = attrs.ok_or_else(|| anyhow!("MFCreateAttributes returned nothing"))?;
+        attrs.SetBlob(&MFT_ENUM_ADAPTER_LUID, &adapter_luid.to_le_bytes())?;
+        let mut pp: *mut Option<IMFActivate> = std::ptr::null_mut();
+        let mut count = 0u32;
+        MFTEnum2(
+            MFT_CATEGORY_VIDEO_ENCODER,
+            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+            None,
+            Some(&out_info),
+            &attrs,
+            &mut pp,
+            &mut count,
+        )
+        .context("MFTEnum2")?;
+        Ok(take_activates(pp, count))
+    }
+}
+
+/// Takes ownership of an MFTEnum* result array (each IMFActivate released exactly once).
+unsafe fn take_activates(pp: *mut Option<IMFActivate>, count: u32) -> Vec<(String, IMFActivate)> {
+    let mut result = Vec::new();
+    if pp.is_null() {
+        return result;
+    }
+    let slice = std::slice::from_raw_parts_mut(pp, count as usize);
+    for slot in slice.iter_mut() {
+        let Some(act) = slot.take() else { continue };
+        let mut name = PWSTR::null();
+        let mut len = 0u32;
+        let friendly = if act.GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut name, &mut len).is_ok() {
+            let s = name.to_string().unwrap_or_default();
+            CoTaskMemFree(Some(name.0 as _));
+            s
+        } else {
+            "<unnamed>".to_string()
+        };
+        result.push((friendly, act));
+    }
+    CoTaskMemFree(Some(pp as _));
+    result
 }
 
 /// Names of the hardware encoders for `codec`, in merit order. Safe to call from any thread
@@ -226,10 +266,19 @@ impl MfEncoder {
         bail!("no hardware {} encoder could be started ({})", codec_label(cfg.codec), errors.join("; "))
     }
 
-    fn from_activate(name: String, activate: IMFActivate, cfg: &EncoderConfig) -> Result<Self> {
-        let r = unsafe { Self::create(&name, &activate, cfg) };
+    /// Opens one enumerated encoder (see `list_hw_encoders`, `list_hw_encoders_on`).
+    pub fn from_activate(name: String, activate: IMFActivate, cfg: &EncoderConfig) -> Result<Self> {
+        let mut r = unsafe { Self::create(&name, &activate, cfg, cfg.d3d.as_ref()) };
+        if let (Err(e), Some(_)) = (&r, &cfg.d3d) {
+            // Some MFTs take the manager and then fail later; retry with system memory input.
+            info!("encoder {name}: GPU input failed ({e:#}); trying system memory input");
+            unsafe {
+                let _ = activate.ShutdownObject();
+            }
+            r = unsafe { Self::create(&name, &activate, cfg, None) };
+        }
         match r {
-            Ok((transform, events, codec, provides_samples, output_size)) => Ok(Self {
+            Ok((transform, events, codec, provides_samples, output_size, gpu_input)) => Ok(Self {
                 transform,
                 activate,
                 events,
@@ -242,6 +291,7 @@ impl MfEncoder {
                 debug: std::env::var_os("NANOCAST_DEBUG").is_some(),
                 name,
                 video_codec: cfg.codec,
+                gpu_input,
             }),
             Err(e) => {
                 unsafe {
@@ -257,7 +307,8 @@ impl MfEncoder {
         name: &str,
         activate: &IMFActivate,
         cfg: &EncoderConfig,
-    ) -> Result<(IMFTransform, IMFMediaEventGenerator, Option<ICodecAPI>, bool, u32)> {
+        d3d: Option<&IMFDXGIDeviceManager>,
+    ) -> Result<(IMFTransform, IMFMediaEventGenerator, Option<ICodecAPI>, bool, u32, bool)> {
         let transform: IMFTransform = match activate.ActivateObject() {
             Ok(t) => t,
             Err(e) => {
@@ -276,6 +327,19 @@ impl MfEncoder {
         }
         attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)?;
         let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
+
+        // GPU input: the device manager goes in before any media type is set.
+        let mut gpu_input = false;
+        if let Some(manager) = d3d {
+            if attrs.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) != 0 {
+                transform
+                    .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)
+                    .context("MFT_MESSAGE_SET_D3D_MANAGER")?;
+                gpu_input = true;
+            } else {
+                info!("encoder {name} is not D3D11-aware; system memory input");
+            }
+        }
 
         // Codec properties. Failures are logged, not fatal: vendors differ.
         let codec = transform.cast::<ICodecAPI>().ok();
@@ -331,14 +395,15 @@ impl MfEncoder {
 
         let events: IMFMediaEventGenerator = transform.cast().context("IMFMediaEventGenerator")?;
         info!(
-            "encoder {name}: {} {}x{} @ {} fps, {} kbps",
+            "encoder {name}: {} {}x{} @ {} fps, {} kbps, {} input",
             codec_label(cfg.codec),
             cfg.width,
             cfg.height,
             cfg.fps,
-            cfg.bitrate_bps / 1000
+            cfg.bitrate_bps / 1000,
+            if gpu_input { "D3D11 texture" } else { "system memory" }
         );
-        Ok((transform, events, codec, provides_samples, info.cbSize.max(cfg.width * cfg.height)))
+        Ok((transform, events, codec, provides_samples, info.cbSize.max(cfg.width * cfg.height), gpu_input))
     }
 
     /// Blocks until the encoder wants a frame, delivering any output produced meanwhile.
@@ -436,12 +501,37 @@ impl MfEncoder {
             buffer.SetCurrentLength(nv12.len() as u32)?;
             let sample = MFCreateSample()?;
             sample.AddBuffer(&buffer)?;
-            sample.SetSampleTime(pts_hns)?;
-            sample.SetSampleDuration(self.frame_duration_hns)?;
-            self.inflight.push_back(Inflight { pts_hns, submitted: Instant::now(), capture_instant });
-            self.transform.ProcessInput(0, &sample, 0).context("ProcessInput")?;
+            self.process_input(&sample, pts_hns, capture_instant, None)
+        }
+    }
+
+    /// GPU input: `tex` (NV12, canvas size, on the device of `EncoderConfig::d3d`) is read by
+    /// the encoder asynchronously; `slot` stays busy (`slot_busy`) until its output came out.
+    pub fn submit_texture(&mut self, tex: &ID3D11Texture2D, slot: usize, pts_hns: i64, capture_instant: Instant) -> Result<()> {
+        unsafe {
+            let buffer = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, tex, 0, false).context("MFCreateDXGISurfaceBuffer")?;
+            let len = buffer.cast::<IMF2DBuffer>()?.GetContiguousLength()?;
+            buffer.SetCurrentLength(len)?;
+            let sample = MFCreateSample()?;
+            sample.AddBuffer(&buffer)?;
+            self.process_input(&sample, pts_hns, capture_instant, Some(slot))
+        }
+    }
+
+    unsafe fn process_input(&mut self, sample: &IMFSample, pts_hns: i64, capture_instant: Instant, slot: Option<usize>) -> Result<()> {
+        sample.SetSampleTime(pts_hns)?;
+        sample.SetSampleDuration(self.frame_duration_hns)?;
+        self.inflight.push_back(Inflight { pts_hns, submitted: Instant::now(), capture_instant, slot });
+        if let Err(e) = self.transform.ProcessInput(0, sample, 0) {
+            self.inflight.pop_back();
+            return Err(e).context("ProcessInput");
         }
         Ok(())
+    }
+
+    /// The input texture `slot` is still being encoded.
+    pub fn slot_busy(&self, slot: usize) -> bool {
+        self.inflight.iter().any(|f| f.slot == Some(slot))
     }
 
     fn pull_output(&mut self) -> Result<Option<EncodedFrame>> {
@@ -500,7 +590,7 @@ impl MfEncoder {
                     self.inflight.drain(..i);
                     f
                 }
-                None => self.inflight.pop_front().unwrap_or(Inflight { pts_hns, submitted: now, capture_instant: now }),
+                None => self.inflight.pop_front().unwrap_or(Inflight { pts_hns, submitted: now, capture_instant: now, slot: None }),
             };
             Ok(Some(EncodedFrame {
                 pts_hns,

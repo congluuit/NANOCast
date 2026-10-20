@@ -9,9 +9,16 @@
 //! what was sent in that second; a new target bitrate is applied on the fly when the MFT
 //! accepts it (`MfEncoder::set_bitrate`), otherwise and for frame-rate changes the encoder is
 //! reopened (its first frame is an IDR).
+//!
+//! Low CPU (PLAN.md Phase 1): BGRA -> NV12 runs on the GPU and the NV12 texture goes straight
+//! into a D3D11-aware encoder (`gpu`, `MfEncoder::submit_texture`); otherwise, or when the
+//! GPU path fails, the CPU converter is used. `CastConfig::convert` (or `NANOCAST_CONVERT=gpu|cpu`)
+//! forces one. Unchanged frames are not encoded (`CastConfig::skip_static`, `NANOCAST_SKIP_STATIC=0`
+//! turns that off); the last
+//! frame is repeated after `REPEAT_AFTER` without a new one so the TV keeps its clock.
 
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -25,14 +32,50 @@ use nanocast_core::protocol::{PacedSender, VideoCodec, AUDIO_PORT, MAX_PAYLOAD};
 
 use crate::audio::{AudioCounters, AudioSender};
 
-use crate::capture::{self, CaptureCounters, CaptureFlags, CapturedFrame, Source};
+use crate::capture::{self, CaptureCounters, CaptureFlags, CapturedFrame, Pixels, Source, MODE_CPU, MODE_GPU, MODE_WAIT};
 use crate::control_link::{ControlLink, ReceiverReport};
 use crate::convert::fit_size;
+use crate::gpu::{device_manager, GpuFrame};
 use crate::mf_encoder::{EncodedFrame, EncoderConfig, MfEncoder, MfRuntime};
 use crate::sources;
 
 /// Largest picture sent, whatever the monitor (receivers are 1080p TVs).
 pub const MAX_CANVAS: (u32, u32) = (1920, 1080);
+/// Longest gap between two encoded frames while the screen does not change.
+const REPEAT_AFTER: Duration = Duration::from_secs(1);
+/// GPU path health check: capture -> encoded above this for `GPU_SLOW_WINDOWS` stats windows
+/// in a row (0.5 s each) switches to the CPU path. Normal is 12-16 ms; seen 40-370 ms when the
+/// process had only 2 logical CPUs (docs/benchmark.md).
+const GPU_SLOW_MS: f64 = 60.0;
+const GPU_SLOW_WINDOWS: u32 = 3;
+
+/// Where BGRA -> NV12 runs (`CastConfig::convert`, overridden by `NANOCAST_CONVERT`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ConvertPath {
+    /// GPU when the device, the video processor and the encoder allow it, else CPU.
+    #[default]
+    Auto,
+    /// GPU or fail (for testing).
+    Gpu,
+    Cpu,
+}
+
+impl ConvertPath {
+    /// `NANOCAST_CONVERT=auto|gpu|cpu`, `None` when unset or unknown.
+    pub fn from_env() -> Option<Self> {
+        match std::env::var("NANOCAST_CONVERT").ok()?.to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "gpu" => Some(Self::Gpu),
+            "cpu" => Some(Self::Cpu),
+            _ => None,
+        }
+    }
+}
+
+/// `NANOCAST_SKIP_STATIC=0|1` overrides `CastConfig::skip_static` (for testing).
+fn skip_static_from_env() -> Option<bool> {
+    std::env::var("NANOCAST_SKIP_STATIC").ok().map(|v| v != "0")
+}
 /// How long after an on-the-fly bitrate change the real rate is compared with the target.
 const BITRATE_CHECK_AFTER: Duration = Duration::from_millis(1500);
 
@@ -60,6 +103,11 @@ pub struct CastConfig {
     pub sender_name: String,
     /// Send system sound from the start (can be changed later with `set_audio`).
     pub audio: bool,
+    /// Where BGRA -> NV12 runs; `NANOCAST_CONVERT` overrides it.
+    pub convert: ConvertPath,
+    /// Do not encode frames while the screen does not change (one repeat per `REPEAT_AFTER`);
+    /// `NANOCAST_SKIP_STATIC` overrides it.
+    pub skip_static: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,7 +151,15 @@ pub struct CastStats {
     pub fps: f64,
     pub mbps: f64,
     pub encode_ms: f64,
+    /// CPU time per frame to get it to the encoder (GPU path: hash + copy + video processor
+    /// submission; CPU path: read back + conversion).
     pub convert_ms: f64,
+    /// BGRA -> NV12 on the GPU and textures into the encoder (zero-copy path).
+    pub gpu_convert: bool,
+    /// Frames not encoded because the screen did not change.
+    pub frames_unchanged: u64,
+    /// Frames re-encoded after `REPEAT_AFTER` without a change.
+    pub frames_repeated: u64,
     /// Capture -> encoded frame ready to send.
     pub latency_ms: f64,
     pub frames_sent: u64,
@@ -381,6 +437,105 @@ impl Adapter {
     }
 }
 
+/// Last frame given to the encoder, kept to repeat it while the screen does not change.
+enum LastFrame {
+    Cpu(Vec<u8>),
+    /// Its pool texture stays reserved while kept.
+    Gpu(GpuFrame),
+}
+
+/// Frame flow state between capture and encoder.
+struct Pipe {
+    /// GPU path available (capture converts on the GPU, `EncoderConfig::d3d` is its device).
+    gpu: bool,
+    /// Capture's `CaptureFlags::mode`.
+    mode: Arc<AtomicU8>,
+    /// Capture's `CaptureFlags::force_next`.
+    force_next: Arc<AtomicBool>,
+    last: Option<LastFrame>,
+    /// GPU frames still read by the encoder (their textures stay reserved).
+    encoding: Vec<GpuFrame>,
+    last_input: Instant,
+    repeated: u64,
+}
+
+impl Pipe {
+    /// Tells the capture which kind of frame the current encoder takes.
+    fn follow(&mut self, encoder: &MfEncoder) {
+        let gpu = encoder.gpu_input && self.gpu;
+        self.mode.store(if gpu { MODE_GPU } else { MODE_CPU }, Ordering::Relaxed);
+        self.force_next.store(true, Ordering::Relaxed);
+        self.encoding.clear();
+    }
+
+    /// Gives up the GPU path for the rest of the cast; the caller reopens the encoder
+    /// (without the D3D manager) when it took textures.
+    fn drop_gpu(&mut self, why: &str, enc_cfg: &mut EncoderConfig) {
+        warn!("GPU conversion off ({why}); converting on the CPU");
+        self.gpu = false;
+        enc_cfg.d3d = None;
+        if matches!(self.last, Some(LastFrame::Gpu(_))) {
+            self.last = None;
+        }
+        self.encoding.clear();
+        self.mode.store(MODE_CPU, Ordering::Relaxed);
+        self.force_next.store(true, Ordering::Relaxed);
+    }
+
+    /// Frees the textures the encoder is done with.
+    fn release_done(&mut self, enc: &MfEncoder) {
+        self.encoding.retain(|f| enc.slot_busy(f.slot));
+    }
+
+    fn keep_last(&mut self, frame: LastFrame) {
+        if let Some(LastFrame::Gpu(prev)) = self.last.replace(frame) {
+            self.encoding.push(prev);
+        }
+        self.last_input = Instant::now();
+    }
+
+    /// Encodes one captured frame (or drops it when it does not fit the current encoder).
+    /// Returns the frame's conversion time when it was encoded.
+    fn encode(&mut self, enc: &mut MfEncoder, sink: &mut Sink, frame: CapturedFrame, t0: Instant) -> Result<Option<u64>> {
+        let pts_hns = frame.captured.duration_since(t0).as_nanos() as i64 / 100;
+        match frame.pixels {
+            Pixels::Cpu(nv12) if !enc.gpu_input => {
+                encode_one(enc, sink, &nv12, pts_hns, frame.captured)?;
+                self.keep_last(LastFrame::Cpu(nv12));
+            }
+            Pixels::Gpu(f) if enc.gpu_input && self.gpu => {
+                encode_texture(enc, sink, &f, pts_hns, frame.captured)?;
+                self.keep_last(LastFrame::Gpu(f));
+            }
+            // Captured before the encoder changed kind.
+            _ => {
+                self.force_next.store(true, Ordering::Relaxed);
+                return Ok(None);
+            }
+        }
+        self.release_done(enc);
+        Ok(Some(frame.convert_us))
+    }
+
+    /// Re-encodes the last frame when nothing was encoded for `REPEAT_AFTER`.
+    fn repeat_if_due(&mut self, enc: &mut MfEncoder, sink: &mut Sink, t0: Instant) -> Result<()> {
+        self.release_done(enc);
+        if self.last_input.elapsed() < REPEAT_AFTER {
+            return Ok(());
+        }
+        let now = Instant::now();
+        let pts_hns = now.duration_since(t0).as_nanos() as i64 / 100;
+        match &self.last {
+            Some(LastFrame::Cpu(nv12)) if !enc.gpu_input => encode_one(enc, sink, nv12, pts_hns, now)?,
+            Some(LastFrame::Gpu(f)) if enc.gpu_input && !enc.slot_busy(f.slot) => encode_texture(enc, sink, f, pts_hns, now)?,
+            _ => return Ok(()),
+        }
+        self.last_input = now;
+        self.repeated += 1;
+        Ok(())
+    }
+}
+
 /// Opens an encoder for `enc_cfg.codec`; HEVC that cannot be started falls back to H.264
 /// (and changes `enc_cfg.codec`).
 fn open_encoder(
@@ -474,6 +629,45 @@ fn run(cfg: &CastConfig, controls: &Controls, stats: &Mutex<CastStats>) -> Resul
     // recover (or join late) at the next periodic keyframe, so keep those frequent.
     let has_link = link.is_some();
     let gop = |fps: u32| if has_link { fps * 10 } else { fps * 2 };
+
+    // Capture starts first: with the GPU path the encoder works on the capture's device.
+    let path = ConvertPath::from_env().unwrap_or(cfg.convert);
+    let (tx, rx): (SyncSender<CapturedFrame>, Receiver<CapturedFrame>) = sync_channel(2);
+    let (gpu_tx, gpu_rx) = sync_channel(1);
+    let counters = Arc::new(CaptureCounters::default());
+    let interval_us = Arc::new(AtomicU64::new(1_000_000 / target.fps.max(1) as u64));
+    let capture_paused = Arc::new(AtomicBool::new(false));
+    let mode = Arc::new(AtomicU8::new(MODE_WAIT));
+    let force_next = Arc::new(AtomicBool::new(false));
+    let flags = CaptureFlags {
+        tx,
+        interval_us: interval_us.clone(),
+        paused: capture_paused.clone(),
+        canvas,
+        counters: counters.clone(),
+        mode: mode.clone(),
+        gpu_tx: (path != ConvertPath::Cpu).then_some(gpu_tx),
+        skip_static: skip_static_from_env().unwrap_or(cfg.skip_static),
+        force_next: force_next.clone(),
+    };
+    let capture = CaptureGuard(Some(capture::start(&cfg.source, flags)?));
+    let d3d = if path == ConvertPath::Cpu {
+        None
+    } else {
+        let device = gpu_rx.recv_timeout(Duration::from_secs(3)).ok().flatten();
+        match device.map(|d| device_manager(&d)) {
+            Some(Ok(m)) => Some(m),
+            Some(Err(e)) => {
+                warn!("GPU conversion unavailable ({e:#}); converting on the CPU");
+                None
+            }
+            None => None,
+        }
+    };
+    if path == ConvertPath::Gpu && d3d.is_none() {
+        anyhow::bail!("GPU conversion unavailable (conversion forced to GPU)");
+    }
+
     let mut enc_cfg = EncoderConfig {
         codec,
         width: canvas.0,
@@ -482,9 +676,23 @@ fn run(cfg: &CastConfig, controls: &Controls, stats: &Mutex<CastStats>) -> Resul
         bitrate_bps: target.mbps * 1_000_000,
         gop_frames: gop(target.fps),
         encoder_index: 0,
+        d3d,
     };
     let mut bad_encoders = Vec::new();
     let mut encoder = open_encoder(&mut enc_cfg, cfg.encoder.as_deref(), &bad_encoders, &mut fallback)?;
+    if path == ConvertPath::Gpu && !encoder.gpu_input {
+        anyhow::bail!("encoder {} does not take D3D11 textures (conversion forced to GPU)", encoder.name);
+    }
+    let mut pipe = Pipe {
+        gpu: enc_cfg.d3d.is_some(),
+        mode,
+        force_next,
+        last: None,
+        encoding: Vec::new(),
+        last_input: Instant::now(),
+        repeated: 0,
+    };
+    pipe.follow(&encoder);
     let start_msg = Message::Start {
         w: canvas.0,
         h: canvas.1,
@@ -498,6 +706,7 @@ fn run(cfg: &CastConfig, controls: &Controls, stats: &Mutex<CastStats>) -> Resul
     {
         let mut s = stats.lock().unwrap();
         s.encoder = encoder.name.clone();
+        s.gpu_convert = encoder.gpu_input && pipe.gpu;
         s.codec = enc_cfg.codec;
         s.codec_fallback = fallback;
         s.size = canvas;
@@ -517,18 +726,6 @@ fn run(cfg: &CastConfig, controls: &Controls, stats: &Mutex<CastStats>) -> Resul
         latency_us: 0,
     };
 
-    let (tx, rx): (SyncSender<CapturedFrame>, Receiver<CapturedFrame>) = sync_channel(2);
-    let counters = Arc::new(CaptureCounters::default());
-    let interval_us = Arc::new(AtomicU64::new(1_000_000 / target.fps.max(1) as u64));
-    let capture_paused = Arc::new(AtomicBool::new(false));
-    let flags = CaptureFlags {
-        tx,
-        interval_us: interval_us.clone(),
-        paused: capture_paused.clone(),
-        canvas,
-        counters: counters.clone(),
-    };
-    let capture = CaptureGuard(Some(capture::start(&cfg.source, flags)?));
     let mut audio = AudioPart {
         addr: SocketAddr::new(cfg.video_addr.ip(), AUDIO_PORT),
         sender: None,
@@ -539,7 +736,7 @@ fn run(cfg: &CastConfig, controls: &Controls, stats: &Mutex<CastStats>) -> Resul
     audio.follow(controls.audio.load(Ordering::Relaxed));
     stats.lock().unwrap().phase = Phase::Casting;
     info!(
-        "casting {:?} -> {} as {} {}x{} @ {} fps, {} Mbps{}",
+        "casting {:?} -> {} as {} {}x{} @ {} fps, {} Mbps{}, NV12 on the {}",
         cfg.source,
         cfg.video_addr,
         enc_cfg.codec.as_str(),
@@ -547,7 +744,8 @@ fn run(cfg: &CastConfig, controls: &Controls, stats: &Mutex<CastStats>) -> Resul
         canvas.1,
         target.fps,
         target.mbps,
-        if adapter.is_some() { " (adaptive)" } else { "" }
+        if adapter.is_some() { " (adaptive)" } else { "" },
+        if encoder.gpu_input && pipe.gpu { "GPU" } else { "CPU" }
     );
 
     let t0 = Instant::now();
@@ -562,6 +760,7 @@ fn run(cfg: &CastConfig, controls: &Controls, stats: &Mutex<CastStats>) -> Resul
     // (seen with Intel QSV): from then on every change reopens the encoder.
     let mut dynamic_ignored = false;
     let mut reopen_pending = false;
+    let mut gpu_slow = 0u32;
 
     let reason = loop {
         if stop.load(Ordering::Relaxed) {
@@ -626,6 +825,11 @@ fn run(cfg: &CastConfig, controls: &Controls, stats: &Mutex<CastStats>) -> Resul
                 (s.target_mbps, s.target_fps, s.adapt_reason) = (target.mbps, target.fps, a.ctl.reason());
             }
         }
+        // The capture side cannot feed the GPU path (other adapter, shared texture failure).
+        if pipe.gpu && counters.gpu_failed.load(Ordering::Relaxed) {
+            pipe.drop_gpu("capture side", &mut enc_cfg);
+            reopen |= encoder.gpu_input;
+        }
         if reopen {
             // A new encoder starts with an IDR, so the TV resyncs by itself.
             enc_cfg.fps = target.fps;
@@ -633,26 +837,45 @@ fn run(cfg: &CastConfig, controls: &Controls, stats: &Mutex<CastStats>) -> Resul
             let name = encoder.name.clone();
             drop(encoder); // free the hardware session before opening the next one
             encoder = open_encoder(&mut enc_cfg, Some(&name), &bad_encoders, &mut fallback)?;
+            pipe.follow(&encoder);
             stats.lock().unwrap().encoder = encoder.name.clone();
         }
 
         let step = match rx.recv_timeout(Duration::from_millis(5)) {
             // Frames captured just before a pause are not sent.
-            Ok(_) if held => Ok(()),
+            Ok(_) if held => {
+                pipe.force_next.store(true, Ordering::Relaxed);
+                Ok(())
+            }
             Ok(msg) => {
-                convert_us += msg.convert_us;
-                converted += 1;
                 // keyframe_request from the receiver (set by the control reader thread).
                 if want_keyframe.swap(false, Ordering::Relaxed) {
                     encoder.request_keyframe();
                 }
-                let pts_hns = msg.captured.duration_since(t0).as_nanos() as i64 / 100;
-                encode_one(&mut encoder, &mut sink, &msg.nv12, pts_hns, msg.captured)
+                pipe.encode(&mut encoder, &mut sink, msg, t0).map(|us| {
+                    if let Some(us) = us {
+                        convert_us += us;
+                        converted += 1;
+                    }
+                })
+            }
+            Err(RecvTimeoutError::Timeout) if !held => {
+                encoder.poll_output(|f| sink.push(f)).and_then(|()| pipe.repeat_if_due(&mut encoder, &mut sink, t0))
             }
             Err(RecvTimeoutError::Timeout) => encoder.poll_output(|f| sink.push(f)),
             Err(RecvTimeoutError::Disconnected) => break EndReason::SourceClosed,
         };
         if let Err(e) = step {
+            // GPU input first falls back to CPU input with the same encoder.
+            if encoder.gpu_input {
+                pipe.drop_gpu(&format!("{e:#}"), &mut enc_cfg);
+                let name = encoder.name.clone();
+                drop(encoder);
+                encoder = open_encoder(&mut enc_cfg, Some(&name), &bad_encoders, &mut fallback)?;
+                pipe.follow(&encoder);
+                stats.lock().unwrap().encoder = encoder.name.clone();
+                continue;
+            }
             // An encoder that opened but never produced a frame is treated like one that
             // failed to open: try the next one. After the first frame, an error is fatal.
             if sink.total > 0 {
@@ -662,6 +885,7 @@ fn run(cfg: &CastConfig, controls: &Controls, stats: &Mutex<CastStats>) -> Resul
             bad_encoders.push(encoder.name.clone());
             drop(encoder);
             encoder = open_encoder(&mut enc_cfg, None, &bad_encoders, &mut fallback)?;
+            pipe.follow(&encoder);
             let mut s = stats.lock().unwrap();
             (s.encoder, s.codec, s.codec_fallback) = (encoder.name.clone(), enc_cfg.codec, fallback);
             continue;
@@ -680,7 +904,20 @@ fn run(cfg: &CastConfig, controls: &Controls, stats: &Mutex<CastStats>) -> Resul
             s.frames_sent = sink.total;
             s.keyframes = sink.keyframes;
             s.frames_dropped = counters.dropped.load(Ordering::Relaxed) as u64 + sink.net.dropped;
+            s.frames_unchanged = counters.unchanged.load(Ordering::Relaxed) as u64;
+            s.frames_repeated = pipe.repeated;
+            s.gpu_convert = encoder.gpu_input && pipe.gpu;
             (s.paused, s.blank) = (paused, blank);
+            if s.gpu_convert && sink.frames > 0 && s.latency_ms > GPU_SLOW_MS {
+                gpu_slow += 1;
+                if gpu_slow >= GPU_SLOW_WINDOWS {
+                    let why = format!("capture->encoded {:.0} ms for {GPU_SLOW_WINDOWS} windows", s.latency_ms);
+                    pipe.drop_gpu(&why, &mut enc_cfg);
+                    reopen_pending = true;
+                }
+            } else {
+                gpu_slow = 0;
+            }
             // Judged only while frames flow (a static screen is below any target anyway).
             if let Some((want, at)) = bitrate_check {
                 if Instant::now() >= at && s.fps >= 20.0 {
@@ -727,5 +964,17 @@ fn run(cfg: &CastConfig, controls: &Controls, stats: &Mutex<CastStats>) -> Resul
 fn encode_one(enc: &mut MfEncoder, sink: &mut Sink, nv12: &[u8], pts_hns: i64, captured: Instant) -> Result<()> {
     enc.wait_need_input(|f| sink.push(f))?;
     enc.submit(nv12, pts_hns, captured)?;
+    enc.poll_output(|f| sink.push(f))
+}
+
+fn encode_texture(
+    enc: &mut MfEncoder,
+    sink: &mut Sink,
+    frame: &GpuFrame,
+    pts_hns: i64,
+    captured: Instant,
+) -> Result<()> {
+    enc.wait_need_input(|f| sink.push(f))?;
+    enc.submit_texture(&frame.tex, frame.slot, pts_hns, captured)?;
     enc.poll_output(|f| sink.push(f))
 }

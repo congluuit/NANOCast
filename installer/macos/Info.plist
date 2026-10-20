@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template for NANOCast.app; build-mac.sh replaces __VERSION__. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.redharegames.nanocast</string>
+	<key>CFBundleName</key>
+	<string>NANOCast</string>
+	<key>CFBundleDisplayName</key>
+	<string>NANOCast</string>
+	<key>CFBundleExecutable</key>
+	<string>nanocast</string>
+	<key>CFBundleIconFile</key>
+	<string>NANOCast</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__VERSION__</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>vi</string>
+	<!-- ScreenCaptureKit needs 12.3; system sound needs 13.0 (checked at run time). -->
+	<key>LSMinimumSystemVersion</key>
+	<string>12.3</string>
+	<!-- A normal app with a Dock icon and menu bar (there is no menu-bar-only mode on macOS). -->
+	<key>LSUIElement</key>
+	<false/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.education</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<!-- Dual-GPU Intel MacBooks: let the OpenGL (glow) window stay on the integrated GPU. -->
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+	<!--
+		Screen Recording: macOS writes the permission prompt itself and does not read any
+		Info.plist key for it. This string is informational only (shown by some macOS
+		versions / MDM tools) and harmless when ignored.
+		No NSMicrophoneUsageDescription on purpose: system sound is taken from ScreenCaptureKit
+		(capturesAudio), which is covered by Screen Recording; NANOCast never opens a microphone.
+	-->
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>NANOCast ghi hình màn hình hoặc một cửa sổ để phát lên TV. / NANOCast captures your screen or one window to show it on the TV.</string>
+	<!-- macOS 15+: Local Network privacy covers mDNS discovery and UDP/TCP to the TV. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>NANOCast tìm TV trong mạng LAN và gửi hình ảnh, âm thanh tới TV. / NANOCast finds TVs on your local network and streams your screen to them.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_nanocast._udp</string>
+		<string>_googlecast._tcp</string>
+	</array>
+</dict>
+</plist>

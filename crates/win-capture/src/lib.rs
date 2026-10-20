@@ -1,5 +1,6 @@
 //! Windows sender pipeline, shared by the `nanocast` app and `spike-win`:
-//! Windows Graphics Capture (monitor or one window, paced) -> BGRA->NV12 (CPU, rayon) ->
+//! Windows Graphics Capture (monitor or one window, paced, unchanged frames skipped) ->
+//! BGRA->NV12 (GPU video processor, texture straight into the encoder; CPU/rayon fallback) ->
 //! Media Foundation H.264 hardware encoder (async MFT, first working one in merit order) ->
 //! paced UDP (`nanocast_core::protocol::PacedSender`) + TCP control channel.
 //!
@@ -14,6 +15,8 @@ pub mod convert;
 pub mod capture;
 #[cfg(windows)]
 pub mod control_link;
+#[cfg(windows)]
+pub mod gpu;
 #[cfg(windows)]
 pub mod mf_encoder;
 #[cfg(windows)]

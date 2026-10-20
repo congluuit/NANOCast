@@ -88,9 +88,31 @@ jobs:
           path: dist/*.apk
           if-no-files-found: error
 
+  macos:
+    name: macOS .dmg (universal)
+    needs: windows
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      # Version check is done by the windows job (needs: windows).
+      - name: build-mac.sh
+        run: bash installer/macos/build-mac.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: installer/out/NANOCast-*-macos-universal.dmg
+          if-no-files-found: error
+
   release:
     name: GitHub Release
-    needs: [windows, android]
+    needs: [windows, android, macos]
+    # The macOS build is not verified on real hardware yet: if only it fails, still publish
+    # the Windows installer and APK (the .dmg is then simply missing from the release).
+    if: ${{ !cancelled() && needs.windows.result == 'success' && needs.android.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

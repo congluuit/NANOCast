@@ -75,21 +75,40 @@ jobs:
           path: receiver-androidtv/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
-  # Phase 3 groundwork: core + desktop receiver on macOS / Linux. Not required to pass yet.
-  unix:
-    name: ${{ matrix.os }} (core + receiver)
-    runs-on: ${{ matrix.os }}
+  # GUI (nanocast) for Intel and Apple Silicon. Build only: linking needs the macOS SDK, but
+  # running needs Screen Recording permission, which a CI runner cannot grant.
+  macos:
+    name: macOS GUI (x86_64 + arm64)
+    runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "12.3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build --release (Apple Silicon)
+        run: cargo build --release -p nanocast --target aarch64-apple-darwin
+      - name: cargo build --release (Intel)
+        run: cargo build --release -p nanocast --target x86_64-apple-darwin
+      - name: cargo test (pure-Rust parts of nanocast-mac, core)
+        run: cargo test -p nanocast-mac -p nanocast-core
+      - name: Universal binary
+        run: |
+          lipo -create target/aarch64-apple-darwin/release/nanocast target/x86_64-apple-darwin/release/nanocast -output nanocast-universal
+          lipo -info nanocast-universal
+
+  # Phase 3 groundwork: core + desktop receiver on Linux. Not required to pass yet.
+  linux:
+    name: ubuntu-latest (core + receiver)
+    runs-on: ubuntu-latest
     continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Linux packages (ALSA for cpal, X11/Wayland for winit)
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libx11-dev

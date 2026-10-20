@@ -3,6 +3,7 @@ name = "nanocast"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 build = "build.rs"
 description = "NANOCast: cast your screen or one app to a TV on the same network"
 
@@ -15,13 +16,19 @@ env_logger.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 directories = "6"
-# Default GUI language from the system locale.
-sys-locale = "0.3"
+# Google Cast (Chromecast built-in) fallback for TVs without the NANOCast app.
+nanocast-cast.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 nanocast-win.workspace = true
 # glow (OpenGL) instead of wgpu keeps nanocast.exe small; accesskit/links/clipboard are not needed.
 eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts"] }
+# Notification-area icon while casting with the window closed, and Ctrl+Shift+P (pause).
+tray-icon = { version = "0.26", default-features = false }
+global-hotkey = "0.9"
+# Show the window again from the tray (a hidden winit window gets no frames).
+raw-window-handle = "0.6"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nanocast-mac.workspace = true

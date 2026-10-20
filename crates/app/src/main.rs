@@ -5,11 +5,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+mod chromecast;
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod config;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod gui;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod i18n;
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+mod tray;
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+mod widgets;
 
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 fn main() -> eframe::Result {

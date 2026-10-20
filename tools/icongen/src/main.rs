@@ -1,5 +1,6 @@
 //! Renders the hand-drawn SVG assets into every raster form the apps need:
-//!   assets/icon.svg   -> assets/generated/icon-<n>.png, assets/nanocast.ico,
+//!   assets/icon.svg   -> assets/generated/icon-<n>.png (16..1024, 1024 for the macOS .icns),
+//!                        assets/nanocast.ico,
 //!                        receiver-androidtv/.../mipmap-*/ic_launcher.png
 //!   assets/banner.svg -> assets/generated/banner-640x360.png,
 //!                        receiver-androidtv/.../drawable-xhdpi/banner.png
@@ -46,7 +47,7 @@ fn main() -> Result<()> {
 
     println!("icon.svg:");
     let icon = load_svg(&root.join("assets/icon.svg"))?;
-    for size in [16u32, 24, 32, 48, 64, 128, 256, 512] {
+    for size in [16u32, 24, 32, 48, 64, 128, 256, 512, 1024] {
         write_png(&render(&icon, size, size), &gen.join(format!("icon-{size}.png")))?;
     }
 

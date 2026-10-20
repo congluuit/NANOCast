@@ -1,6 +1,6 @@
 //! BGRA8 -> NV12 (BT.709, limited range) on the CPU. Rows are processed in
-//! pairs in parallel. This is the temporary path; a later step moves this to a GPU
-//! shader so the frame never leaves VRAM.
+//! pairs in parallel. Fallback for when the GPU path (`gpu::Nv12Converter`) is unavailable;
+//! `fit_rect` / `fit_size` are shared by both.
 
 use rayon::prelude::*;
 
@@ -56,7 +56,7 @@ pub fn fit_size(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
 /// Converts a `src_w`x`src_h` BGRA picture (tightly packed) into an NV12 canvas of
 /// `dst_w`x`dst_h`, scaled to fit with black bars. When the sizes already match (after
 /// dropping an odd last row/column) this is the plain conversion.
-/// Scaling is nearest-neighbour: cheap, fine for 2:1 and close ratios; the GPU path will replace it.
+/// Scaling is nearest-neighbour: cheap, fine for 2:1 and close ratios (the GPU path filters).
 pub fn bgra_to_nv12_fit(bgra: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32, out: &mut [u8]) {
     if src_w & !1 == dst_w && src_h & !1 == dst_h {
         bgra_to_nv12(bgra, src_w, dst_w, dst_h, out);

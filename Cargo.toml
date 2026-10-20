@@ -9,6 +9,7 @@ members = [
     "crates/receiver-desktop",
     "crates/mac-capture",
     "crates/linux-capture",
+    "crates/cast-google",
     "tools/icongen",
 ]
 
@@ -26,6 +27,7 @@ nanocast-core = { path = "crates/core" }
 nanocast-win = { path = "crates/win-capture" }
 nanocast-mac = { path = "crates/mac-capture" }
 nanocast-linux = { path = "crates/linux-capture" }
+nanocast-cast = { path = "crates/cast-google" }
 
 [profile.release]
 opt-level = 3

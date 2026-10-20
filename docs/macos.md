@@ -111,23 +111,92 @@ lipo -create target/x86_64-apple-darwin/release/examples/mac_cast target/aarch64
 lipo -info target/mac_cast-universal
 ```
 
-Đóng gói `.app` universal, ký ad-hoc (cả hai target, `lipo`, Info.plist, icon từ `assets/generated`, `codesign -s -`, zip):
+Đóng gói `.app` cho công cụ thử `mac_cast` (không có GUI): `sh crates/mac-capture/macos/bundle.sh --example mac_cast`. Bản cài GUI cho người dùng thì dùng `installer/macos/build-mac.sh` (mục 3a).
+
+## 3a. Đóng gói bản cài `.dmg` trên Mac mini (`installer/macos/build-mac.sh`)
+
+> **Trạng thái 2026-10-20: CHƯA CHẠY trên Mac thật.** Script đã qua `bash -n`; `cargo check --release -p nanocast` cho `aarch64-apple-darwin` và `x86_64-apple-darwin` sạch trên Windows. Lần chạy đầu trên Mac mini có thể còn lỗi nhỏ (đường dẫn, `hdiutil`).
+
+Một Mac (Intel hay Apple Silicon đều được) build ra **một** file `.dmg` universal chạy trên cả hai loại máy: Rust biên dịch chéo hai target, `lipo` ghép lại. Không cần Xcode đầy đủ, chỉ cần Command Line Tools.
+
+Chuẩn bị một lần (đã có ở mục 3 thì bỏ qua):
 
 ```bash
-sh crates/mac-capture/macos/bundle.sh --example mac_cast
+xcode-select --install
 ```
 
 ```bash
-sh crates/mac-capture/macos/bundle.sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-Lệnh thứ hai đóng gói GUI `nanocast`, nên chỉ chạy sau khi đã làm mục 4. Kết quả nằm ở `target/macos/NANOCast.app` và `target/macos/NANOCast-<version>-macos.zip`. Mẫu Info.plist: `crates/mac-capture/macos/Info.plist`. Không dùng `cargo-bundle` vì nó không ghép universal và không có `NSLocalNetworkUsageDescription`.
-
-Chạy app tải từ mạng về (bị Gatekeeper chặn vì chưa notarize): chuột phải > Open, hoặc:
+Lấy mã nguồn (hoặc `git pull` nếu đã có):
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/NANOCast.app
+git clone https://github.com/redharegames/NANOCast.git
 ```
+
+```bash
+cd NANOCast
+```
+
+Build và đóng gói:
+
+```bash
+bash installer/macos/build-mac.sh
+```
+
+Thêm bản riêng cho từng loại máy (file nhỏ hơn, tuỳ chọn):
+
+```bash
+bash installer/macos/build-mac.sh --per-arch
+```
+
+Script in từng bước (`==> ...`) và dừng ngay ở bước lỗi. Chạy lại bao nhiêu lần cũng được: mọi kết quả cũ bị xoá và tạo lại. Các bước:
+
+1. Kiểm tra công cụ (`cargo`, `rustup`, `lipo`, `iconutil`, `codesign`, `hdiutil`, `plutil`, `ditto`) và đọc version từ `Cargo.toml` (`[workspace.package] version`).
+2. `rustup target add aarch64-apple-darwin x86_64-apple-darwin` (chỉ tải khi thiếu).
+3. `cargo build --release -p nanocast --target <target>` cho từng target, `MACOSX_DEPLOYMENT_TARGET=12.3`.
+4. `lipo -create` ra binary universal.
+5. `NANOCast.icns` bằng `iconutil` từ `assets/generated/icon-16.png` … `icon-1024.png` (sinh bằng `cargo run -p icongen`).
+6. `NANOCast.app`: `Contents/MacOS/nanocast`, `Contents/Resources/NANOCast.icns`, `Contents/Info.plist` từ `installer/macos/Info.plist` (thay `__VERSION__`), `plutil -lint`.
+7. `codesign --force --deep -s -` (ad-hoc) rồi `codesign --verify --deep --strict`.
+8. `hdiutil create` (UDZO) chứa `NANOCast.app` và lối tắt `Applications`, rồi `hdiutil verify`.
+
+Kết quả:
+
+| File | Dùng cho |
+|---|---|
+| `installer/out/NANOCast-<version>-macos-universal.dmg` | Mọi Mac (Intel và Apple Silicon), macOS 12.3+. File phát hành chính. |
+| `installer/out/NANOCast-<version>-macos-arm64.dmg` | Chỉ Apple Silicon (M1/M2/M3/M4…), với `--per-arch`. |
+| `installer/out/NANOCast-<version>-macos-x86_64.dmg` | Chỉ Mac Intel, với `--per-arch`. |
+| `target/macos-pkg/universal/NANOCast.app` | Chạy thử ngay không cần mở `.dmg`: `open target/macos-pkg/universal/NANOCast.app`. |
+
+Tuỳ chọn khác: `--no-build` đóng gói lại binary đã có trong `target/` (sửa Info.plist/icon mà không build lại); `SIGN_IDENTITY="NANOCast Dev"` ký bằng chứng chỉ tự ký để giữ quyền Screen Recording qua các lần build (mục 5).
+
+Về Info.plist (`installer/macos/Info.plist`):
+- `CFBundleIdentifier` = `com.redharegames.nanocast`, `LSMinimumSystemVersion` = 12.3 (ScreenCaptureKit), `LSUIElement` = false (app thường, có icon Dock).
+- Screen Recording: macOS không đọc key Info.plist nào cho quyền này, hộp thoại do hệ thống viết. `NSScreenCaptureUsageDescription` chỉ để mô tả, bị bỏ qua cũng không sao.
+- **Không** có `NSMicrophoneUsageDescription`: tiếng hệ thống lấy qua ScreenCaptureKit (`capturesAudio`), thuộc quyền Screen Recording. NANOCast không mở micro, nên không có lý do hỏi quyền micro.
+- `NSLocalNetworkUsageDescription` + `NSBonjourServices` (`_nanocast._udp`, `_googlecast._tcp`): macOS 15+ hỏi quyền Local Network để tìm TV và Chromecast.
+- `NSSupportsAutomaticGraphicsSwitching`: MacBook Intel hai GPU không bị ép sang GPU rời chỉ vì cửa sổ OpenGL.
+
+Nền `.dmg` để mặc định (không ảnh nền): đặt nền và vị trí icon cần AppleScript điều khiển Finder trong phiên đăng nhập có màn hình, runner CI không có.
+
+CI: `.github/workflows/ci.yml` (job `macos`) build `nanocast` cho cả hai target ở mỗi push; `release.yml` chạy `build-mac.sh` trên `macos-latest` khi push tag `v*` và đưa `NANOCast-<version>-macos-universal.dmg` lên GitHub Release cùng bản Windows và APK. Nếu riêng job macOS lỗi, Release vẫn được tạo (thiếu `.dmg`).
+
+## 3b. Cài trên Mac và mở lần đầu (bản ký ad-hoc, chưa có Developer ID)
+
+1. Mở `NANOCast-<version>-macos-universal.dmg`, kéo **NANOCast** vào **Applications**.
+2. Lần đầu mở, macOS báo *"NANOCast" không thể mở vì Apple không thể kiểm tra phần mềm độc hại* (hoặc *"is damaged"*). Đây là do app chưa ký Developer ID / chưa notarize, không phải app hỏng. Chọn một trong các cách:
+   - **Chuột phải** (hoặc Control + bấm) vào NANOCast trong Applications > **Open** > **Open**. Chỉ cần làm một lần.
+   - macOS 15 (Sequoia) trở lên không còn cho chuột phải > Open: mở thử một lần, rồi vào **System Settings > Privacy & Security**, kéo xuống, bấm **Open Anyway** cạnh dòng về NANOCast, nhập mật khẩu.
+   - Hoặc trong Terminal (bỏ cờ quarantine, cách chắc nhất):
+     ```bash
+     xattr -dr com.apple.quarantine /Applications/NANOCast.app
+     ```
+3. Cấp quyền **Screen Recording**: lần đầu NANOCast hiện dòng nhắc và nút cấp quyền (hoặc macOS tự hỏi). Vào **System Settings > Privacy & Security > Screen Recording** (macOS 15: *Screen & System Audio Recording*), bật **NANOCast**. Sau đó **thoát hẳn NANOCast (Cmd+Q) và mở lại**, quyền mới có hiệu lực.
+4. macOS 15+: khi được hỏi *"NANOCast muốn tìm thiết bị trong mạng cục bộ"*, chọn **Allow**. Từ chối thì danh sách TV sẽ rỗng (bật lại ở *Privacy & Security > Local Network*).
+5. Cài bản mới đè lên: bản ad-hoc có chữ ký khác mỗi lần build, nên macOS có thể hỏi lại quyền Screen Recording. Nếu công tắc đã bật mà vẫn không có hình: tắt rồi bật lại, hoặc `tccutil reset ScreenCapture com.redharegames.nanocast` rồi cấp lại.
 
 ## 4. GUI `crates/app` trên macOS (đã nối 2026-10-19, chưa chạy trên Mac)
 
@@ -157,7 +226,7 @@ Các bước (để tham khảo):
 4. Font: `install_fonts` đọc `%WINDIR%\Fonts\segoeui.ttf`. Trên macOS hãy đọc `/System/Library/Fonts/Supplemental/Arial.ttf` (đủ dấu tiếng Việt). Trường hợp không có thì giữ font mặc định của egui.
 5. Quyền: khi mở app, nếu `sources::has_screen_recording_permission()` trả về false thì hiện một dòng hướng dẫn và nút "Cấp quyền" gọi `sources::request_screen_recording_permission()`. Đừng chờ tới lúc bấm Cast, vì danh sách cửa sổ sẽ rỗng khi chưa có quyền.
 6. Nút Âm thanh: `sources::audio_supported()` là false trên macOS 12, khi đó disable nút. Nếu vẫn bật, `CastStats::audio_error` sẽ báo "system sound needs macOS 13 or later".
-7. `crates/app/build.rs` chỉ nhúng icon khi `cfg(windows)`, nên không cần đổi. Icon macOS do `bundle.sh` thêm vào.
+7. `crates/app/build.rs` chỉ nhúng icon khi `cfg(windows)`, nên không cần đổi. Icon macOS do `installer/macos/build-mac.sh` thêm vào.
 
 ## 5. Quyền (TCC) và mạng
 
@@ -168,7 +237,7 @@ Các bước (để tham khảo):
 - macOS 15 (Sequoia) trở lên định kỳ hỏi lại ("NANOCast muốn tiếp tục ghi màn hình"), và hiện chỉ báo ghi màn hình màu tím trên thanh menu. Đây là hành vi bình thường.
 - Quyền gắn với chữ ký code. Bản ký **ad-hoc** (`codesign -s -`) đổi danh tính sau mỗi lần build, nên macOS coi đó là app mới và phải cấp quyền lại. Để giữ quyền qua các lần build, tạo một chứng chỉ code-signing tự ký trong Keychain Access (Certificate Assistant > Create a Certificate, loại "Code Signing", ví dụ tên "NANOCast Dev"), rồi build với:
   ```bash
-  SIGN_IDENTITY="NANOCast Dev" sh crates/mac-capture/macos/bundle.sh
+  SIGN_IDENTITY="NANOCast Dev" bash installer/macos/build-mac.sh
   ```
 - Xoá quyền cũ khi bị kẹt (ví dụ hộp thoại không hiện nữa mà quyền vẫn tắt):
   ```bash
@@ -211,6 +280,6 @@ Các bước (để tham khảo):
 ## 8. Việc tiếp theo
 
 1. Chạy `mac_cast` trên Mac mini (Apple Silicon và nếu được thì cả Intel), sửa lỗi lúc chạy, ghi số đo vào `docs/benchmark.md`.
-2. Nối GUI theo mục 4, rồi đóng gói bằng `bundle.sh`.
+2. Chạy `installer/macos/build-mac.sh` trên Mac mini (mục 3a), cài `.dmg` trên một Mac Intel và một Mac Apple Silicon, ghi kết quả vào mục 2.
 3. Chuyển `control_link.rs` (đang trùng với Windows) vào `nanocast-core`.
-4. Tuỳ chọn: ký bằng Developer ID + notarize để bỏ bước `xattr`; CI macOS (`macos-14` runner) chạy `bundle.sh`.
+4. Tuỳ chọn: ký bằng Developer ID + notarize (`codesign --options runtime` + `xcrun notarytool`) để bỏ bước mở lần đầu ở mục 3b. CI đã build `.dmg` (mục 3a).
