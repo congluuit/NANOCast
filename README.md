@@ -57,7 +57,7 @@ Không tài khoản, không internet, không thu thập dữ liệu, không qu�
 |---|---|
 | **Chiếu toàn màn hình hoặc một ứng dụng** | Chọn cửa sổ nào thì chỉ cửa sổ đó lên TV, kể cả khi bị che bởi cửa sổ khác. |
 | **Full HD 60 fps, bitrate thích nghi** | 10–30 Mbps; mạng yếu thì tự hạ chất lượng, ổn định lại thì tự tăng. |
-| **Âm thanh** | Bật/tắt ngay trong lúc chiếu; tiếng của máy tính (YouTube, PowerPoint) ra loa TV. |
+| **Âm thanh** | Bật/tắt ngay trong lúc chiếu; tiếng của máy tính (YouTube, PowerPoint) ra loa TV, chỉ trên TV hoặc cả TV và máy tính. |
 | **Tạm dừng / Màn hình đen** | TV giữ hình hoặc tối đen khi giáo viên làm việc riêng; phím tắt **Ctrl+Shift+P**. |
 | **Mã 4 số** | Tuỳ chọn trên TV, tránh học sinh chiếu đè. |
 | **Chromecast có sẵn trong TV** | Không cài gì trên TV cũng chiếu được (trễ hơn), xem [bên dưới](#hai-cách-chiếu-lên-tv). |
@@ -144,9 +144,9 @@ TV / box Android (Android TV, Google TV, Fire TV, box Android bất kỳ):
   adb install -r NANOCast-Receiver-<version>-androidtv.apk
   ```
 
-Mở app *NANOCast* trên TV; góc trái hiện IP của TV. Bật **Game Mode** trên TV để giảm trễ. Hướng dẫn đầy đủ từng hãng TV, mẹo mạng, cách đo độ trễ: [docs/tv-setup.md](docs/tv-setup.md). Đăng lên Google Play: [docs/play-store.md](docs/play-store.md).
+Mở app *NANOCast* trên TV: màn hình chờ hiện tên TV, địa chỉ IP và mã 4 số (nếu bật); khi hình lên thì chỉ còn hình. Bấm **▼** trên điều khiển để hiện / ẩn thông số kỹ thuật (fps, Mbps, gói mất…). Bật **Game Mode** trên TV để giảm trễ. Hướng dẫn đầy đủ từng hãng TV, mẹo mạng, cách đo độ trễ: [docs/tv-setup.md](docs/tv-setup.md). Đăng lên Google Play: [docs/play-store.md](docs/play-store.md).
 
-**Mã 4 số (tuỳ chọn, mặc định tắt)**: bấm **OK** trên điều khiển TV để bật/tắt. Khi bật, góc dưới phải hiện `Mã / Code 1234`; máy tính phải nhập đúng mã mới chiếu được, và TV chỉ nhận hình/tiếng từ đúng máy đó. Mã được nhớ qua các lần mở app; tắt rồi bật lại thì có mã mới.
+**Mã 4 số (tuỳ chọn, mặc định tắt)**: bấm **OK** trên điều khiển TV để bật/tắt. Khi bật, màn hình chờ hiện **Mã kết nối 1234**; máy tính phải nhập đúng mã mới chiếu được, và TV chỉ nhận hình/tiếng từ đúng máy đó. Mã được nhớ qua các lần mở app; tắt rồi bật lại thì có mã mới.
 
 TV không phải Android (Samsung Tizen, LG webOS, máy chiếu thường): dùng Chromecast có sẵn nếu TV có, hoặc cắm PC cũ / Raspberry Pi chạy [receiver desktop](#receiver-desktop-pc-cũ--mini-pc--raspberry-pi-cắm-hdmi-vào-tv-máy-chiếu), hoặc một box Android TV giá rẻ.
 
@@ -162,7 +162,7 @@ TV không phải Android (Samsung Tizen, LG webOS, máy chiếu thường): dùn
    - **Nhanh nhất · cần app NANOCast**: TV / box Android hoặc PC đang chạy app NANOCast. Nút **Tải app NANOCast cho TV (APK)** ngay dưới danh sách tải đúng file của phiên bản đang dùng.
    - **Không cần cài, hơi trễ**: TV có sẵn Chromecast (Google TV, Android TV, Chromecast). Loa Google Home / Nest không hiện.
    - Không thấy TV? Bấm **TV của tôi không hiện?**: 3 điều cần kiểm tra và ô gõ địa chỉ IP đang hiện trên TV (mạng trường hay chặn việc tự tìm).
-2. **Chiếu gì.** Hai nút lớn: **Toàn màn hình** (nhiều màn hình thì chọn ở ô *Màn hình*) hoặc **Một ứng dụng** (danh sách cửa sổ đang mở với tên dễ hiểu; cửa sổ hệ thống đã được lọc). Chỉ cửa sổ đó lên TV, kể cả khi bị che; menu bật ra là cửa sổ riêng nên không hiện, cần thấy menu thì chọn Toàn màn hình. Công tắc **Âm thanh** (mặc định tắt) gửi tiếng của máy tính ra loa TV.
+2. **Chiếu gì.** Hai nút lớn: **Toàn màn hình** (nhiều màn hình thì chọn ở ô *Màn hình*) hoặc **Một ứng dụng** (danh sách cửa sổ đang mở với tên dễ hiểu; cửa sổ hệ thống đã được lọc). Chỉ cửa sổ đó lên TV, kể cả khi bị che; menu bật ra là cửa sổ riêng nên không hiện, cần thấy menu thì chọn Toàn màn hình. Công tắc **Âm thanh** (mặc định tắt) gửi tiếng của máy tính ra loa TV. Trên Windows chọn thêm **Chỉ trên TV** (mặc định: loa máy tính tạm tắt tiếng trong lúc cast, dừng cast là bật lại) hoặc **TV và máy tính**.
    TV đang bật **mã 4 số** (thẻ có ổ khoá): app hỏi mã bằng một ô số lớn; nhập một lần, app nhớ cho lần sau.
 3. **Đang cast lên &lt;TV&gt;.** Thanh trạng thái bằng lời: *Tốt* / *Mạng yếu, đang giảm chất lượng* / *Mất kết nối* / *Đang tạm dừng* / *Màn hình đen*. Ba nút lớn:
    - **Tạm dừng**: TV giữ hình đang hiện, máy tính ngừng gửi hình và tiếng; **Tiếp tục** để chiếu lại. Phím tắt toàn cục **Ctrl+Shift+P**.

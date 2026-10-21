@@ -3,6 +3,19 @@
 Mọi thay đổi đáng chú ý của NANOCast. Số phiên bản dùng chung cho app máy tính và app TV (`version` trong `Cargo.toml`, tag `v<version>`).
 Mục của mỗi phiên bản được dùng làm nội dung GitHub Release (`.github/workflows/release.yml`).
 
+## [0.3.0] - 2026-10-21
+
+### Mới
+- **App TV có màn hình chờ**: logo, *Đang chờ kết nối* / *Đã kết nối với …* / *Đang nhận hình từ …*, tên TV, địa chỉ IP và mã 4 số (nếu bật), phím điều khiển. Tiếng Việt hoặc English theo ngôn ngữ của TV.
+- **Âm thanh: Chỉ trên TV / TV và máy tính** (Windows). *Chỉ trên TV* (mặc định) tạm tắt tiếng loa máy tính trong lúc cast có âm thanh, dừng cast hoặc tắt âm thanh là bật lại; TV vẫn nhận đủ tiếng. NANOCast bị tắt ngang thì lần mở sau tự bật lại loa.
+
+### Thay đổi
+- App TV: khi hình đã lên thì không còn chữ / thông số đè lên hình. Thông số kỹ thuật ẩn mặc định, bấm **▼** để hiện / ẩn (nhớ cho lần sau). Mã 4 số chuyển vào màn hình chờ.
+
+### Lưu ý khi nâng cấp
+- App máy tính và app TV từ 0.2.0 tự cập nhật lên bản này.
+- Trước đây bật **Âm thanh** thì tiếng phát cả trên TV lẫn máy tính; giờ mặc định là **Chỉ trên TV**. Muốn như cũ thì chọn **TV và máy tính** dưới công tắc Âm thanh.
+
 ## [0.2.0] - 2026-10-21
 
 ### Mới

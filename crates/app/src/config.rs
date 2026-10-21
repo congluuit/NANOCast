@@ -49,6 +49,12 @@ pub struct Config {
     pub codec: VideoCodec,
     pub adaptive: bool,
     pub audio: bool,
+    /// Windows: sound plays on the PC's speakers too while it goes to the TV. Off: they are
+    /// muted for the cast ("TV only").
+    pub sound_on_pc: bool,
+    /// Windows: the output device NANOCast muted for "TV only". Unmuted when the cast ends,
+    /// or at the next start if NANOCast did not get to it (crash, power loss).
+    pub muted_speakers: Option<String>,
     /// Cast the screen to `last_tv` as soon as it shows up after the app opens.
     pub auto_recast: bool,
     /// `None`: follow the system language.
@@ -75,6 +81,8 @@ impl Default for Config {
             codec: VideoCodec::H264,
             adaptive: true,
             audio: false,
+            sound_on_pc: false,
+            muted_speakers: None,
             auto_recast: false,
             language: None,
             convert: ConvertPref::Auto,
@@ -199,6 +207,7 @@ mod tests {
         assert_eq!(Config::from_json("{}").unwrap(), Config::default());
         let d = Config::default();
         assert_eq!((d.convert, d.skip_static), (ConvertPref::Auto, true));
+        assert!(!d.sound_on_pc && d.muted_speakers.is_none());
         assert_eq!(Config::from_json("{\"convert\": \"gpu\"}").unwrap().convert, ConvertPref::Gpu);
         assert_eq!(Config::from_json("{\"convert\": \"npu\", \"fps\": 30}").unwrap().fps, 30);
         let c = Config::from_json("{\"fps\": 45, \"bitrate_mbps\": 500, \"future\": 1}").unwrap();

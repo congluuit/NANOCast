@@ -295,6 +295,8 @@ struct NanoApp {
     update_later: bool,
     /// The installer / new exe was started: nothing more to do at exit.
     update_started: bool,
+    /// "TV only" sound is in force: the PC's speakers were muted for this cast (Windows).
+    speakers_held: bool,
 }
 
 impl NanoApp {
@@ -357,7 +359,10 @@ impl NanoApp {
             updater: Updater::new(),
             update_later: false,
             update_started: false,
+            speakers_held: false,
         };
+        // Muted by a NANOCast that ended without unmuting (crash, power loss).
+        app.restore_speakers();
         if let Some(last) = app.config.last_tv.clone() {
             let info = last_tv_info(&last);
             if let Some(pin) = &last.pin {
@@ -804,6 +809,42 @@ impl NanoApp {
         }
     }
 
+    /// "TV only" sound (Windows): mutes the PC's speakers while a cast sends sound and unmutes
+    /// them once it ends, sound goes off or "TV and computer" is chosen. Loopback capture is
+    /// not affected by the mute, so the TV keeps getting the sound.
+    #[cfg(windows)]
+    fn follow_speakers(&mut self) {
+        let want = self.casting() && self.config.audio && !self.config.sound_on_pc;
+        if want == self.speakers_held {
+            return;
+        }
+        self.speakers_held = want;
+        if want {
+            match platform::speaker::mute_default() {
+                Ok(id) => self.config.muted_speakers = id,
+                Err(e) => log::warn!("muting PC speakers: {e:#}"),
+            }
+        } else {
+            self.restore_speakers();
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn follow_speakers(&mut self) {}
+
+    /// Unmutes what `follow_speakers` muted (nothing when the user had muted it already).
+    #[cfg(windows)]
+    fn restore_speakers(&mut self) {
+        if let Some(id) = self.config.muted_speakers.take() {
+            if let Err(e) = platform::speaker::unmute(&id) {
+                log::warn!("unmuting PC speakers: {e:#}");
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn restore_speakers(&mut self) {}
+
     fn show_window_again(&mut self) {
         self.hidden = false;
         self.tray.hide();
@@ -1127,6 +1168,12 @@ impl NanoApp {
                         ui.label(RichText::new(t.sound).font(w::bold(17.0)));
                         let sub = if !audio_ok {
                             t.audio_mac13
+                        } else if on && SPEAKER_CHOICE {
+                            if self.config.sound_on_pc {
+                                t.sound_both_sub
+                            } else {
+                                t.sound_tv_only_sub
+                            }
                         } else if on {
                             t.sound_on
                         } else {
@@ -1141,6 +1188,12 @@ impl NanoApp {
                         }
                     });
                 });
+                if SPEAKER_CHOICE && self.config.audio && audio_ok {
+                    ui.add_space(8.0);
+                    if let Some(i) = w::choice(ui, usize::from(self.config.sound_on_pc), &[t.sound_tv_only, t.sound_both]) {
+                        self.config.sound_on_pc = i == 1;
+                    }
+                }
             });
     }
 
@@ -1734,6 +1787,7 @@ impl eframe::App for NanoApp {
         self.handle_tray(&ctx);
         self.refresh();
         self.watch_cast();
+        self.follow_speakers();
         self.updater.tick(self.config.auto_update);
         let frame = egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(20, 12));
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
@@ -1776,6 +1830,8 @@ impl eframe::App for NanoApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Stops capture, sends `stop` to the TV and releases the encoder before the process ends.
         self.stop_cast();
+        self.speakers_held = false;
+        self.restore_speakers();
         self.tray.hide();
         if self.config != self.saved {
             self.config.save();
@@ -2250,6 +2306,9 @@ fn portal_picks_source() -> bool {
 fn audio_supported() -> bool {
     true
 }
+
+/// "TV only / TV and computer" under Sound: muting the speakers is done on Windows only.
+const SPEAKER_CHOICE: bool = cfg!(windows);
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn audio_supported() -> bool {

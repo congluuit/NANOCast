@@ -27,7 +27,7 @@ Cần cho mục 3A (nút *Cài app lên TV* trong app máy tính) và 3B (`adb`)
 1. Settings → *System* (hoặc *Device Preferences*) → **About** → bấm **Build** (hoặc *Android TV OS build*) **7 lần** cho đến khi hiện "You are now a developer".
 2. Quay lại → **Developer options** (trong System / Device Preferences).
 3. Bật **USB debugging**. Nếu có **Network debugging** thì bật luôn. TV Android 11+ có thể bật **Wireless debugging** (Gỡ lỗi không dây) thay vào: lần đầu phải ghép nối bằng mã 6 số (mục 3A làm được việc này).
-4. Xem IP của TV: Settings → Network & Internet → tên mạng đang kết nối (hoặc overlay của app NANOCast hiện IP).
+4. Xem IP của TV: Settings → Network & Internet → tên mạng đang kết nối (hoặc màn hình chờ của app NANOCast hiện IP).
 
 **Fire TV:** Settings → My Fire TV → About → bấm tên thiết bị 7 lần → Developer Options → bật **ADB debugging** và **Apps from Unknown Sources**.
 
@@ -65,7 +65,7 @@ TV hiện hộp thoại "Allow USB debugging?" lần đầu → chọn *Always a
 5. Hoặc copy APK vào USB, cắm vào TV, mở bằng file manager (File Commander, X-plore) → *Install*.
 6. Sau khi cài, bật lại cài đặt "unknown apps" về tắt nếu muốn.
 
-Mở app *NANOCast* trên launcher (nếu không thấy, tìm trong *Apps* / *Cài đặt → Ứng dụng*). Góc trái hiện IP của TV; bấm **OK** trên remote để bật/tắt mã 4 số.
+Mở app *NANOCast* trên launcher (nếu không thấy, tìm trong *Apps* / *Cài đặt → Ứng dụng*). Màn hình chờ hiện tên TV, IP và mã 4 số (nếu bật); bấm **OK** trên remote để bật/tắt mã 4 số, **▼** để hiện / ẩn thông số kỹ thuật.
 
 Nếu bản trên Play Store đã phát hành: tìm "NANOCast" trên Google Play của TV (xem [play-store.md](play-store.md)).
 
@@ -77,7 +77,7 @@ Nếu bản trên Play Store đã phát hành: tìm "NANOCast" trên Google Play
 - **PC và TV phải cùng mạng con** (cùng dải 192.168.x.x). Mạng khách (Guest) và Wi-Fi mesh có thể khác dải.
 - **Tắt AP isolation / Client isolation / Wireless isolation** trên router (hay bị bật ở mạng Wi-Fi khách, mạng trường học), nếu không các thiết bị Wi-Fi không nhìn thấy nhau.
 - **Tường lửa Windows**: lần đầu chạy `nanocast.exe`, chọn *Allow* cho cả Private network. Cổng dùng: UDP 48322 (video), 48324 (âm thanh), TCP 48323 (điều khiển), mDNS UDP 5353.
-- **mDNS bị chặn** (mạng trường học, VLAN khác nhau, switch lọc multicast): PC không thấy TV trong danh sách. Trong `nanocast.exe` dùng ô **nhập IP thủ công** (IP xem trên overlay của TV) và cast như thường.
+- **mDNS bị chặn** (mạng trường học, VLAN khác nhau, switch lọc multicast): PC không thấy TV trong danh sách. Trong `nanocast.exe` dùng ô **nhập IP thủ công** (IP xem trên màn hình chờ của TV) và cast như thường.
 - Không bật VPN trên PC khi cast (VPN thường đổi route LAN).
 - Tránh tải nặng khác (tải file, họp video) qua cùng Wi-Fi trong lúc cast.
 
@@ -92,6 +92,6 @@ Nếu bản trên Play Store đã phát hành: tìm "NANOCast" trên Google Play
 5. Lấy ít nhất 10 mẫu, ghi trung bình và lớn nhất. Màn hình PC 60 Hz cũng có trễ ~8–16 ms cần trừ vào kết quả nếu muốn chính xác (hoặc bỏ qua, chỉ so sánh tương đối).
 6. Ghi lại điều kiện: Ethernet/Wi-Fi 5 GHz, codec (H.264/HEVC), bitrate, chế độ TV (Game / Standard), độ phân giải. Thử **Game Mode bật/tắt** — chênh lệch thường 50–100 ms.
 7. Mục tiêu: PC → TV dưới ~100 ms qua Ethernet, dưới ~150 ms qua Wi-Fi 5 GHz tốt.
-8. Overlay trên TV hiện fps, Mbps, gói mất, decode ms: nếu trễ cao mà decode ms thấp → thủ phạm là mạng hoặc xử lý hình TV (kiểm tra mục 1 và 4).
+8. Thông số trên TV (bấm **▼**) hiện fps, Mbps, gói mất, decode ms: nếu trễ cao mà decode ms thấp → thủ phạm là mạng hoặc xử lý hình TV (kiểm tra mục 1 và 4).
 
 Nếu muốn so sánh thêm với số liệu dự án, xem [benchmark.md](benchmark.md).

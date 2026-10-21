@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="waiting">Đang chờ kết nối</string>
+    <string name="waiting_hint">Mở NANOCast trên máy tính (cùng mạng Wi-Fi) và chọn TV này.</string>
+    <string name="connected">Đã kết nối với %1$s</string>
+    <string name="connected_hint">Chọn nội dung cần chiếu trên máy tính để bắt đầu.</string>
+    <string name="receiving">Đang nhận hình từ %1$s…</string>
+    <string name="receiving_hint">Hình sẽ hiện trong giây lát.</string>
+    <string name="label_name">Tên TV</string>
+    <string name="label_address">Địa chỉ</string>
+    <string name="label_code">Mã kết nối</string>
+    <string name="no_network">Chưa có mạng</string>
+    <string name="key_code_on">OK  Bật mã 4 số</string>
+    <string name="key_code_off">OK  Tắt mã 4 số</string>
+    <string name="key_stats">▼  Thông số kỹ thuật</string>
+
+    <string name="code_on">Mã 4 số: %1$s</string>
+    <string name="code_off">Đã tắt mã 4 số</string>
+</resources>

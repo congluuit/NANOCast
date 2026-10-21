@@ -598,6 +598,34 @@ pub fn switch(ui: &mut Ui, on: &mut bool, enabled: bool) -> Response {
     }
 }
 
+/// Side-by-side choices, one of them selected. Returns the index clicked, if any.
+pub fn choice(ui: &mut Ui, selected: usize, labels: &[&str]) -> Option<usize> {
+    let p = pal(ui);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::hover());
+    let painter = ui.painter().clone();
+    painter.rect_filled(rect, 11.0, p.button);
+    let inner = rect.shrink(3.0);
+    let w = inner.width() / labels.len() as f32;
+    let mut clicked = None;
+    for (i, label) in labels.iter().enumerate() {
+        let r = Rect::from_min_size(pos2(inner.left() + w * i as f32, inner.top()), vec2(w, inner.height()));
+        let resp = ui.interact(r, ui.scope_id().with(("choice", i)), Sense::click());
+        let on = i == selected;
+        if on {
+            painter.rect(r, 9.0, p.accent_soft, Stroke::new(1.0, p.accent), StrokeKind::Inside);
+        } else if resp.hovered() {
+            painter.rect_filled(r, 9.0, p.button_hover);
+        }
+        let (font, color) = if on { (bold(15.0), p.accent) } else { (regular(15.0), p.text) };
+        painter.text(r.center(), Align2::CENTER_CENTER, *label, font, color);
+        if resp.clicked() && !on {
+            clicked = Some(i);
+        }
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
+    clicked
+}
+
 /// A colored box with an icon, a bold title and optional lines below (status or a problem
 /// with the steps to fix it).
 pub fn banner(ui: &mut Ui, tone: Tone, icon_kind: Icon, title: &str, lines: &[&str]) -> Response {

@@ -23,3 +23,5 @@ pub mod mf_encoder;
 pub mod session;
 #[cfg(windows)]
 pub mod sources;
+#[cfg(windows)]
+pub mod speaker;

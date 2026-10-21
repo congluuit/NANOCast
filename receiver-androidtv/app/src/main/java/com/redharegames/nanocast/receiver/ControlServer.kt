@@ -62,6 +62,15 @@ class ControlServer(
     @Volatile private var connected = false
     /** A sender is connected (casting or about to): [Updater] waits. */
     val hasSender: Boolean get() = connected
+    /** Name the accepted sender gave in `hello`, null without one (the waiting screen). */
+    @Volatile var senderName: String? = null
+        private set
+    /** Between `start` and `stop` (or the sender going away): a picture is on its way. */
+    @Volatile var streaming = false
+        private set
+    /** [Stats.framesOutTotal] at the last `start`: more than this = the picture is up. */
+    @Volatile var framesAtStart = 0L
+        private set
 
     private val lastKeyframeNs = AtomicLong(0)
     val keyframeRequests = AtomicLong()
@@ -108,6 +117,8 @@ class ControlServer(
             client = null
             connected = false
             authorized = null
+            senderName = null
+            streaming = false
         }
     }
 
@@ -188,6 +199,8 @@ class ControlServer(
                     Log.i(TAG, "hello from $sender (v${msg.optString("ver")})")
                     adopt(sock)
                     adopted = true
+                    senderName = sender
+                    streaming = false
                     status = "ctrl: $sender ($peer)"
                     send(caps())
                     continue
@@ -202,6 +215,8 @@ class ControlServer(
                         Log.i(TAG, "start: $desc")
                         status = "ctrl: $sender ($peer) $desc"
                         onCodec(codec)
+                        framesAtStart = stats.framesOutTotal()
+                        streaming = true
                         onPause(false)
                         onBlank(false)
                         onAudio(msg.optBoolean("audio"))
@@ -223,6 +238,7 @@ class ControlServer(
                     }
                     "stop" -> {
                         Log.i(TAG, "stop from $sender")
+                        streaming = false
                         onAudio(false)
                         onPause(false)
                         onBlank(false)
@@ -240,6 +256,8 @@ class ControlServer(
                     client = null
                     connected = false
                     authorized = null
+                    senderName = null
+                    streaming = false
                     onAudio(false)
                     onPause(false)
                     onBlank(false)

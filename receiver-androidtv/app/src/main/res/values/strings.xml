@@ -1,4 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">NANOCast</string>
+
+    <!-- Waiting screen (IdleView.kt) -->
+    <string name="waiting">Waiting for a connection</string>
+    <string name="waiting_hint">Open NANOCast on your computer (on the same Wi-Fi) and choose this TV.</string>
+    <string name="connected">Connected to %1$s</string>
+    <string name="connected_hint">Choose what to show on the computer to start casting.</string>
+    <string name="receiving">Receiving the picture from %1$s…</string>
+    <string name="receiving_hint">The picture appears in a moment.</string>
+    <string name="label_name">TV name</string>
+    <string name="label_address">Address</string>
+    <string name="label_code">Code</string>
+    <string name="no_network">No network</string>
+    <string name="key_code_on">OK  Turn on the 4-digit code</string>
+    <string name="key_code_off">OK  Turn off the 4-digit code</string>
+    <string name="key_stats">▼  Technical details</string>
+
+    <string name="code_on">4-digit code: %1$s</string>
+    <string name="code_off">4-digit code off</string>
 </resources>
