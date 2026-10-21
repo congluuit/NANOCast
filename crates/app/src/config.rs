@@ -59,6 +59,10 @@ pub struct Config {
     pub skip_static: bool,
     /// The first-run guide was shown (or skipped).
     pub onboarded: bool,
+    /// Look for new releases on GitHub, download them and install when NANOCast closes.
+    pub auto_update: bool,
+    /// The TV address last typed for "Install the app on a TV over Wi-Fi".
+    pub install_ip: Option<String>,
 }
 
 impl Default for Config {
@@ -76,6 +80,8 @@ impl Default for Config {
             convert: ConvertPref::Auto,
             skip_static: true,
             onboarded: false,
+            auto_update: true,
+            install_ip: None,
         }
     }
 }
@@ -209,5 +215,6 @@ mod tests {
         c.adaptive = false;
         assert_eq!(c.quality(), None);
         assert!(!Config::default().onboarded);
+        assert!(Config::default().auto_update);
     }
 }

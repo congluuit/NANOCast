@@ -60,6 +60,8 @@ class ControlServer(
     private var acceptThread: Thread? = null
     @Volatile private var tx: ScheduledExecutorService? = null
     @Volatile private var connected = false
+    /** A sender is connected (casting or about to): [Updater] waits. */
+    val hasSender: Boolean get() = connected
 
     private val lastKeyframeNs = AtomicLong(0)
     val keyframeRequests = AtomicLong()

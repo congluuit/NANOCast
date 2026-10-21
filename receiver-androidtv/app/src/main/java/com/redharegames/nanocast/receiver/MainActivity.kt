@@ -1,6 +1,7 @@
 package com.redharegames.nanocast.receiver
 
 import android.app.Activity
+import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
 import android.os.Handler
@@ -29,6 +30,7 @@ import java.util.Locale
  * Pause keeps the last decoded picture on the Surface and shows a small pause sign; black
  * screen covers the Surface with a black view. The optional 4-digit code is switched with
  * OK / Enter on the remote, kept in SharedPreferences and shown in the bottom-right corner.
+ * New versions from GitHub: [Updater], its text in the bottom-left corner, ▲ installs.
  */
 class MainActivity : Activity(), SurfaceHolder.Callback {
     private val stats = Stats()
@@ -46,6 +48,8 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var pauseBadge: TextView
     private lateinit var blankView: View
     private lateinit var pinView: TextView
+    private lateinit var updater: Updater
+    private lateinit var updateView: TextView
 
     private val ui = Handler(Looper.getMainLooper())
     private var ticks = 0
@@ -114,6 +118,15 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
         val pinParams = FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.END)
         pinParams.setMargins(0, 0, 32, 32)
+        updateView = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            setBackgroundColor(0x99000000.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setPadding(24, 8, 24, 8)
+            visibility = View.GONE
+        }
+        val updateParams = FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.START)
+        updateParams.setMargins(32, 0, 0, 32)
         val root = FrameLayout(this)
         root.setBackgroundColor(Color.BLACK)
         root.addView(surfaceView, FrameLayout.LayoutParams(-1, -1))
@@ -122,8 +135,14 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         root.addView(blankView, FrameLayout.LayoutParams(-1, -1))
         root.addView(pauseBadge, badgeParams)
         root.addView(pinView, pinParams)
+        root.addView(updateView, updateParams)
         setContentView(root)
         showPin()
+        updater = Updater(this, { control.hasSender }) { msg ->
+            updateView.text = msg.orEmpty()
+            updateView.visibility = if (msg != null) View.VISIBLE else View.GONE
+        }
+        updater.onIntent(intent)
         @Suppress("DEPRECATION")
         root.systemUiVisibility = View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
@@ -143,9 +162,16 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             Log.e(TAG, "cannot bind UDP ${Protocol.AUDIO_PORT}", e)
         }
         ui.post(tick)
+        updater.start()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        updater.onIntent(intent)
     }
 
     override fun onStop() {
+        updater.stop()
         ui.removeCallbacks(tick)
         audio.stop()
         control.stop()
@@ -179,9 +205,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         decoder = null
     }
 
-    /** OK / Enter on the remote: 4-digit code on (new code) / off. */
+    /** OK / Enter on the remote: 4-digit code on (new code) / off. ▲: install a new version. */
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         when (keyCode) {
+            KeyEvent.KEYCODE_DPAD_UP -> if (event.repeatCount == 0 && updater.installNow()) return true
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_BUTTON_A -> {
                 if (event.repeatCount == 0) togglePin()
                 return true

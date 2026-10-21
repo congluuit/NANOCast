@@ -38,6 +38,7 @@ use crate::config::{Config, LastTv, Quality};
 use crate::i18n::{fill, Lang, Tr};
 use crate::tray::{self, LiveSlot, Tray};
 use crate::tv_install::{self, Problem, Step};
+use crate::update::{self, Updater};
 use crate::widgets::{self as w, Icon, Kind, Tone};
 
 const ICON_PNG: &[u8] = include_bytes!("../../../assets/generated/icon-64.png");
@@ -211,10 +212,14 @@ struct PinDialog {
     wrong: bool,
 }
 
-/// "Install the app on this TV" for a Chromecast TV; `job` once started. The text fields
-/// are for Android 11+ Wireless debugging (pairing code, addresses when mDNS fails).
+/// "Install the app on this TV" for a Chromecast TV, or any Android TV by its typed IP
+/// address; `job` once started. `code` / `pair_at` / `connect_at` are for Android 11+
+/// Wireless debugging (pairing code, addresses when mDNS fails).
 struct InstallDialog {
-    tv: gcast::CastDevice,
+    /// The Chromecast name; `None` when the address is typed in.
+    name: Option<String>,
+    /// The TV's IP address (from the Chromecast card, or as typed).
+    ip: String,
     job: Option<tv_install::Job>,
     code: String,
     pair_at: String,
@@ -285,6 +290,11 @@ struct NanoApp {
     /// The window is hidden behind the tray icon.
     hidden: bool,
     quitting: bool,
+    updater: Updater,
+    /// "Later" on the update banner (until NANOCast opens again).
+    update_later: bool,
+    /// The installer / new exe was started: nothing more to do at exit.
+    update_started: bool,
 }
 
 impl NanoApp {
@@ -344,6 +354,9 @@ impl NanoApp {
             live,
             hidden: false,
             quitting: false,
+            updater: Updater::new(),
+            update_later: false,
+            update_started: false,
         };
         if let Some(last) = app.config.last_tv.clone() {
             let info = last_tv_info(&last);
@@ -907,7 +920,9 @@ impl NanoApp {
             if none_found {
                 w::banner(ui, Tone::Warn, Icon::Wifi, t.none_title, &[t.help_1, t.help_2, t.help_3]);
                 self.ui_ip_entry(ui);
-                ui_get_app(ui, t, true);
+                if ui_get_app(ui, t, true) {
+                    self.open_install_by_ip();
+                }
             }
         } else {
             let last = self.config.last_tv.as_ref();
@@ -943,7 +958,7 @@ impl NanoApp {
                 let (card, action) = w::tv_card(ui, &card);
                 if action {
                     if let Tv::Google(d) = tv {
-                        install = Some(d.clone());
+                        install = Some((d.name.clone(), d.addr));
                     }
                 } else if card.clicked() {
                     chosen = Some(tv.clone());
@@ -956,8 +971,8 @@ impl NanoApp {
             if let Some(tv) = chosen {
                 self.choose_tv(tv);
             }
-            if let Some(tv) = install {
-                self.install = Some(InstallDialog { tv, job: None, code: String::new(), pair_at: String::new(), connect_at: String::new() });
+            if let Some((name, addr)) = install {
+                self.open_install(Some(name), addr.to_string());
             }
         }
         if self.browser_error.is_some() {
@@ -967,8 +982,8 @@ impl NanoApp {
             // The banner above already says all of it.
             return;
         }
-        if !self.help_open {
-            ui_get_app(ui, t, false);
+        if !self.help_open && ui_get_app(ui, t, false) {
+            self.open_install_by_ip();
         }
         if w::row_button(ui, Icon::Help, t.not_listed, self.help_open).clicked() {
             self.help_open = !self.help_open;
@@ -981,8 +996,19 @@ impl NanoApp {
                 }
             });
             self.ui_ip_entry(ui);
-            ui_get_app(ui, t, true);
+            if ui_get_app(ui, t, true) {
+                self.open_install_by_ip();
+            }
         }
+    }
+
+    fn open_install(&mut self, name: Option<String>, ip: String) {
+        self.install = Some(InstallDialog { name, ip, job: None, code: String::new(), pair_at: String::new(), connect_at: String::new() });
+    }
+
+    /// Installing on a TV that is not in the list: its address is typed (last one filled in).
+    fn open_install_by_ip(&mut self) {
+        self.open_install(None, self.config.install_ip.clone().unwrap_or_default());
     }
 
     fn ui_ip_entry(&mut self, ui: &mut egui::Ui) {
@@ -1253,8 +1279,8 @@ impl NanoApp {
         ui.add_space(4.0);
         ui.label(RichText::new(t.ob_title[page]).font(w::bold(22.0)));
         ui.add(egui::Label::new(RichText::new(t.ob_body[page]).size(17.0).color(p.text)).wrap());
-        if page == 0 {
-            ui_get_app(ui, t, false);
+        if page == 0 && ui_get_app(ui, t, false) {
+            self.open_install_by_ip();
         }
         ui.add_space(6.0);
         w::page_dots(ui, 3, page);
@@ -1281,6 +1307,116 @@ impl NanoApp {
         if finish {
             self.guide = None;
             self.config.onboarded = true;
+        }
+    }
+
+    /// "A new NANOCast is out" on steps 1 / 2, once it is downloaded (or, where this copy
+    /// cannot install itself, as soon as it is found).
+    fn ui_update_banner(&mut self, ui: &mut egui::Ui) {
+        let t = self.t();
+        let state = self.updater.state();
+        let (ready, version) = match &state {
+            _ if self.update_later => return,
+            update::State::Ready { version, .. } => (true, version.clone()),
+            update::State::Manual { version } => (false, version.clone()),
+            _ => return,
+        };
+        let title = fill(t.upd_title, &[&version]);
+        let lines: Vec<&str> = match (ready, self.config.auto_update && self.updater.applies_quietly()) {
+            (true, true) => vec![t.upd_ready, t.upd_at_exit],
+            (true, false) => vec![t.upd_ready],
+            (false, _) => vec![t.upd_manual],
+        };
+        w::banner(ui, Tone::Accent, Icon::Download, &title, &lines);
+        ui.horizontal(|ui| {
+            let (icon, label) = if ready { (Icon::Refresh, t.upd_now) } else { (Icon::Download, t.upd_download) };
+            if w::big_button(ui, icon, label, None, Kind::Primary, vec2(150.0, 38.0), true).clicked() {
+                if ready {
+                    self.update_now(ui.ctx());
+                } else {
+                    open_in_browser(&update::release_page(Some(&version)));
+                }
+            }
+            if w::big_button(ui, Icon::Back, t.upd_later, None, Kind::Normal, vec2(110.0, 38.0), true).clicked() {
+                self.update_later = true;
+            }
+            if w::link_button(ui, Icon::Info, t.upd_whats_new).clicked() {
+                open_in_browser(&update::release_page(Some(&version)));
+            }
+        });
+        ui.add_space(6.0);
+    }
+
+    /// Starts the installer (or swaps the exe) and closes; it opens NANOCast again.
+    fn update_now(&mut self, ctx: &egui::Context) {
+        match self.updater.apply(true) {
+            Ok(()) => {
+                self.update_started = true;
+                self.stop_cast();
+                self.quitting = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(e) => {
+                log::warn!("update: {e}");
+                let t = self.t();
+                self.notice = Some(Notice { tone: Tone::Bad, title: fill(t.upd_apply_failed, &[&e]), lines: Vec::new(), detail: None });
+            }
+        }
+    }
+
+    /// Settings > Updates: version, the automatic switch, "Check now" and what happened.
+    fn ui_update_settings(&mut self, ui: &mut egui::Ui) {
+        let t = self.t();
+        let p = w::pal(ui);
+        ui.label(RichText::new(t.upd_section).font(w::bold(17.0)));
+        ui.horizontal(|ui| {
+            w::switch(ui, &mut self.config.auto_update, true);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(RichText::new(t.upd_auto).font(w::bold(16.0)));
+                ui.add(egui::Label::new(RichText::new(t.upd_auto_hint).small().color(p.weak)).wrap());
+            });
+        });
+        let state = self.updater.state();
+        let (status, color) = match &state {
+            update::State::Idle => (String::new(), p.weak),
+            update::State::Checking => (t.upd_checking.to_string(), p.weak),
+            update::State::UpToDate => (t.upd_latest.to_string(), p.green),
+            update::State::Manual { version } => (fill(t.upd_title, &[version]), p.accent),
+            update::State::Downloading { version, fraction } => {
+                let pct = fraction.map(|f| format!("{:.0}%", f * 100.0)).unwrap_or_default();
+                (fill(t.upd_downloading, &[version, &pct]), p.accent)
+            }
+            update::State::Ready { version, .. } => (fill(t.upd_ready_short, &[version]), p.accent),
+            update::State::Failed(_) => (t.upd_failed.to_string(), p.red),
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(fill(t.upd_version, &[&update::CURRENT])).color(p.weak));
+            match &state {
+                update::State::Ready { .. } => {
+                    if w::link_button(ui, Icon::Refresh, t.upd_now).clicked() {
+                        self.update_now(ui.ctx());
+                    }
+                }
+                update::State::Manual { version } => {
+                    if w::link_button(ui, Icon::Download, t.upd_download).clicked() {
+                        open_in_browser(&update::release_page(Some(version)));
+                    }
+                }
+                update::State::Checking | update::State::Downloading { .. } => {}
+                _ => {
+                    if w::link_button(ui, Icon::Refresh, t.upd_check).clicked() {
+                        self.update_later = false;
+                        self.updater.check_now();
+                    }
+                }
+            }
+        });
+        if !status.is_empty() {
+            let r = ui.add(egui::Label::new(RichText::new(status).color(color)).wrap());
+            if let update::State::Failed(e) = &state {
+                r.on_hover_text(e);
+            }
         }
     }
 
@@ -1340,6 +1476,8 @@ impl NanoApp {
             self.settings_open = false;
             self.guide = Some(0);
         }
+
+        self.ui_update_settings(ui);
 
         egui::CollapsingHeader::new(RichText::new(t.advanced).font(w::bold(16.0))).id_salt("advanced").show(ui, |ui| {
             egui::Grid::new("advanced-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
@@ -1473,8 +1611,9 @@ impl NanoApp {
         }
     }
 
-    /// Install the receiver on a Chromecast TV over ADB: what to turn on first, then the
-    /// steps as they happen, then done / what went wrong.
+    /// Install the receiver on a TV over ADB: what to turn on first (and the TV address when
+    /// it was not picked from the list), then the steps as they happen, then done / what
+    /// went wrong.
     fn ui_install_dialog(&mut self, ctx: &egui::Context) {
         let t = self.t();
         let Some(dialog) = self.install.as_mut() else {
@@ -1494,11 +1633,21 @@ impl NanoApp {
                 ui.label(RichText::new(t.inst_title).font(w::bold(22.0)));
             });
             let Some(state) = &state else {
-                ui.add(egui::Label::new(fill(t.inst_intro, &[&dialog.tv.name])).wrap());
-                ui_how_to_enable(ui, t);
+                let ready = match &dialog.name {
+                    Some(name) => {
+                        ui.add(egui::Label::new(fill(t.inst_intro, &[name])).wrap());
+                        ui_how_to_enable(ui, t);
+                        true
+                    }
+                    None => {
+                        ui.add(egui::Label::new(t.inst_intro_ip).wrap());
+                        ui_how_to_enable(ui, t);
+                        ui_tv_ip(ui, t, &mut dialog.ip)
+                    }
+                };
                 ui.add(egui::Label::new(RichText::new(t.inst_note).small().color(p.weak)).wrap());
                 ui.horizontal(|ui| {
-                    start = w::big_button(ui, Icon::Download, t.inst_start, None, Kind::Primary, vec2(200.0, 44.0), true).clicked();
+                    start = w::big_button(ui, Icon::Download, t.inst_start, None, Kind::Primary, vec2(200.0, 44.0), ready).clicked();
                     close = w::big_button(ui, Icon::Back, t.cancel, None, Kind::Normal, vec2(150.0, 44.0), true).clicked();
                 });
                 return;
@@ -1535,7 +1684,12 @@ impl NanoApp {
                     } else if pair {
                         ready = ui_pairing(ui, t, dialog, f.problem == Problem::NoPairPort);
                     } else if f.problem == Problem::NoConnectPort {
-                        ready = ui_address(ui, t, t.inst_connect_at, &mut dialog.connect_at, dialog.tv.addr) && !dialog.connect_at.trim().is_empty();
+                        let tv = tv_install::parse_tv_ip(&dialog.ip).unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+                        ready = ui_address(ui, t, t.inst_connect_at, &mut dialog.connect_at, tv) && !dialog.connect_at.trim().is_empty();
+                    }
+                    if dialog.name.is_none() && matches!(f.problem, Problem::NoAdb | Problem::NeedsPairing | Problem::NoPairPort) {
+                        // A wrong address looks like debugging being off: let it be fixed here.
+                        ready &= ui_tv_ip(ui, t, &mut dialog.ip);
                     }
                     egui::CollapsingHeader::new(RichText::new(t.details).small()).id_salt("install-detail").show(ui, |ui| {
                         ui.add(egui::Label::new(RichText::new(&f.detail).monospace()).wrap());
@@ -1552,8 +1706,11 @@ impl NanoApp {
         if modal.should_close() && !dialog.job.as_ref().is_some_and(|j| j.running()) {
             close = true;
         }
-        if start {
-            let addr = dialog.tv.addr;
+        let mut typed = None;
+        if let Some(addr) = start.then(|| tv_install::parse_tv_ip(&dialog.ip)).flatten() {
+            if dialog.name.is_none() {
+                typed = Some(addr.to_string());
+            }
             let host = format!("nanocast@{}", sender_name().split_whitespace().collect::<Vec<_>>().join("-"));
             let wireless = tv_install::Wireless {
                 code: pair.then(|| dialog.code.clone()),
@@ -1565,6 +1722,9 @@ impl NanoApp {
             // Dropping a running job cancels it.
             self.install = None;
         }
+        if typed.is_some() {
+            self.config.install_ip = typed;
+        }
     }
 }
 
@@ -1574,6 +1734,7 @@ impl eframe::App for NanoApp {
         self.handle_tray(&ctx);
         self.refresh();
         self.watch_cast();
+        self.updater.tick(self.config.auto_update);
         let frame = egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(20, 12));
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             self.ui_header(ui);
@@ -1583,6 +1744,9 @@ impl eframe::App for NanoApp {
                 } else if self.settings_open {
                     self.ui_settings(ui);
                 } else {
+                    if self.screen != Screen::Casting {
+                        self.ui_update_banner(ui);
+                    }
                     match self.screen {
                         Screen::Tv => self.ui_step_tv(ui),
                         Screen::What => self.ui_step_what(ui),
@@ -1616,6 +1780,14 @@ impl eframe::App for NanoApp {
         if self.config != self.saved {
             self.config.save();
         }
+        // A downloaded update goes in now, without a window, unless that needs admin rights.
+        if self.config.auto_update && !self.update_started && self.updater.applies_quietly() {
+            if let update::State::Ready { .. } = self.updater.state() {
+                if let Err(e) = self.updater.apply(false) {
+                    log::warn!("update at exit: {e}");
+                }
+            }
+        }
     }
 }
 
@@ -1625,14 +1797,32 @@ fn apk_url() -> String {
     format!("{}/releases/download/v{v}/NANOCast-Receiver-{v}-androidtv.apk", env!("CARGO_PKG_REPOSITORY"))
 }
 
-/// "Download the NANOCast TV app (APK)", with how to get it onto the TV when `hint`.
-fn ui_get_app(ui: &mut egui::Ui, t: &Tr, hint: bool) {
+/// "Download the NANOCast TV app (APK)" and "Install it on a TV over Wi-Fi", with how to
+/// get it onto the TV when `hint`. True when the second one was clicked.
+fn ui_get_app(ui: &mut egui::Ui, t: &Tr, hint: bool) -> bool {
+    let by_ip = w::link_button(ui, Icon::Wifi, t.inst_by_ip).on_hover_text(t.inst_by_ip_tip).clicked();
     if w::link_button(ui, Icon::Download, t.get_app).on_hover_text(apk_url()).clicked() {
         open_in_browser(&apk_url());
     }
     if hint {
         ui.add(egui::Label::new(RichText::new(t.get_app_hint).small().color(w::pal(ui).weak)).wrap());
     }
+    by_ip
+}
+
+/// The TV's IP address for installing by address; true when it reads as one.
+fn ui_tv_ip(ui: &mut egui::Ui, t: &Tr, text: &mut String) -> bool {
+    let p = w::pal(ui);
+    let ok = tv_install::parse_tv_ip(text).is_some();
+    let bad = !ok && !text.trim().is_empty();
+    ui.label(RichText::new(t.inst_ip_label).strong());
+    let mut edit = egui::TextEdit::singleline(text).hint_text("192.168.1.50").font(w::regular(18.0)).desired_width(220.0).margin(vec2(10.0, 8.0));
+    if bad {
+        edit = edit.text_color(p.red);
+    }
+    ui.add(edit);
+    ui.add(egui::Label::new(RichText::new(t.inst_ip_where).small().color(p.weak)).wrap());
+    ok
 }
 
 /// The three things to turn on on the TV before installing over the network.
@@ -1700,9 +1890,10 @@ fn ui_pairing(ui: &mut egui::Ui, t: &Tr, dialog: &mut InstallDialog, show_addres
         r.request_focus();
     }
     let mut ok = dialog.code.len() == 6;
+    let tv = tv_install::parse_tv_ip(&dialog.ip).unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
     egui::CollapsingHeader::new(RichText::new(t.inst_manual).small()).id_salt("install-addresses").default_open(show_addresses).show(ui, |ui| {
-        ok &= ui_address(ui, t, t.inst_pair_at, &mut dialog.pair_at, dialog.tv.addr);
-        ok &= ui_address(ui, t, t.inst_connect_at, &mut dialog.connect_at, dialog.tv.addr);
+        ok &= ui_address(ui, t, t.inst_pair_at, &mut dialog.pair_at, tv);
+        ok &= ui_address(ui, t, t.inst_connect_at, &mut dialog.connect_at, tv);
     });
     ok
 }
@@ -1724,7 +1915,7 @@ fn install_problem(problem: Problem, t: &Tr) -> (&'static str, Vec<&'static str>
     match problem {
         Problem::NoInternet => (t.inst_err_net, vec![t.inst_err_net_1]),
         Problem::NoAdb => (t.inst_err_adb, vec![t.inst_err_adb_1]),
-        Problem::NotAllowed => (t.inst_err_allow, vec![t.inst_err_allow_1]),
+        Problem::NotAllowed => (t.inst_err_allow, vec![t.inst_err_allow_1, t.inst_err_allow_2]),
         Problem::NeedsPairing => (t.inst_err_pair, vec![t.inst_err_pair_1]),
         Problem::WrongCode => (t.inst_err_code, vec![t.inst_err_code_1]),
         Problem::NoPairPort => (t.inst_err_pair_port, vec![t.inst_err_pair_port_1]),

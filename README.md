@@ -103,8 +103,14 @@ Mọi bản phát hành ở [GitHub Releases](https://github.com/congluuit/NANOC
 |---|---|
 | `NANOCast-Setup-<version>.exe` | **Windows**, cài bình thường (tiếng Việt / English). Mặc định cài cho riêng người dùng hiện tại vào `%LOCALAPPDATA%\Programs\NANOCast`, **không cần quyền admin**; chọn "cho mọi người dùng" thì cài vào Program Files (cần admin). Có shortcut Start Menu, tuỳ chọn Desktop, gỡ trong *Settings → Apps*. |
 | `NANOCast-<version>-portable-win64.zip` | Windows, không muốn cài: giải nén, chạy `nanocast.exe` (chép USB mang theo được). |
+| `NANOCast-<version>-portable-win64.exe` | Chính `nanocast.exe` của bản portable, không nén (bản portable tự cập nhật bằng file này). |
 | `NANOCast-Receiver-<version>-androidtv.apk` | Cài lên TV / box Android. |
 | `NANOCast-<version>-macos-universal.dmg` | Mac Intel và Apple Silicon, macOS 12.3+. |
+
+**Tự cập nhật**: vài giờ một lần, app trên máy tính và app trên TV tự xem GitHub Releases có bản mới không.
+- **Windows**: tự tải bản mới về; bấm **Cập nhật** trên thông báo (app đóng, cài, tự mở lại) hoặc để đó, bản mới tự cài khi tắt NANOCast. Bản cài "cho mọi người dùng" (Program Files) cần bấm Cập nhật vì phải hỏi quyền admin. Tắt / kiểm tra ngay trong *Cài đặt → Cập nhật*.
+- **macOS**: báo có bản mới và mở trang tải `.dmg`.
+- **TV**: tự tải APK mới; lúc không có máy nào đang cast, TV hiện hộp thoại *Cài đặt* của Android (Android 12+ từ lần thứ hai thì cài luôn không hỏi). Bỏ qua thì bấm **▲** trên điều khiển để cài sau. TV đang chạy bản cũ ký khoá khác (ví dụ 0.1.0) phải cài lại một lần bằng **Cài app lên TV** trên máy tính.
 
 ### Windows
 
@@ -130,7 +136,7 @@ Tự đóng gói `.dmg` trên Mac (cần `xcode-select --install` và [rustup](h
 
 TV / box Android (Android TV, Google TV, Fire TV, box Android bất kỳ):
 
-- **Từ app trên máy tính, qua Wi-Fi (không cần USB)**: TV có Chromecast hiện trong danh sách với nút **Cài app lên TV**. Trên TV bật *Tuỳ chọn cho nhà phát triển* (Cài đặt → Giới thiệu → bấm *Bản dựng* 7 lần) rồi bật **Gỡ lỗi USB**; bấm *Bắt đầu cài*, trên TV chọn **Cho phép**. App tự tải đúng APK của phiên bản, cài, mở app trên TV rồi **tắt gỡ lỗi** lại. TV Android 11+ chỉ bật *Gỡ lỗi không dây* thì app hỏi mã ghép nối 6 số (Tuỳ chọn cho nhà phát triển → Gỡ lỗi không dây → *Ghép nối thiết bị bằng mã ghép nối*) rồi cài tiếp như trên.
+- **Từ app trên máy tính, qua Wi-Fi (không cần USB)**: TV có Chromecast hiện trong danh sách với nút **Cài app lên TV**; TV / box Android khác (Fire TV, box không có Chromecast, mạng chặn mDNS) thì bấm **Cài app lên TV qua Wi-Fi (gõ địa chỉ IP)** dưới danh sách và gõ IP của TV (Cài đặt → Mạng). Trên TV bật *Tuỳ chọn cho nhà phát triển* (Cài đặt → Giới thiệu → bấm *Bản dựng* 7 lần) rồi bật **Gỡ lỗi USB**; bấm *Bắt đầu cài*, trên TV chọn **Cho phép**. App tự tải đúng APK của phiên bản, cài, mở app trên TV rồi **tắt gỡ lỗi** lại. TV Android 11+ chỉ bật *Gỡ lỗi không dây* thì app hỏi mã ghép nối 6 số (Tuỳ chọn cho nhà phát triển → Gỡ lỗi không dây → *Ghép nối thiết bị bằng mã ghép nối*) rồi cài tiếp như trên.
 - **Không cần máy tính**: trên TV cài app *Downloader* (hoặc trình duyệt), tải file `NANOCast-Receiver-<version>-androidtv.apk` từ [Releases](https://github.com/congluuit/NANOCast/releases/latest), mở file để cài (bật *Cho phép nguồn không xác định* khi TV hỏi). Hoặc chép APK vào USB, mở bằng trình quản lý file trên TV.
 - **Bằng adb từ máy tính**: bật *Developer options → Network debugging* trên TV, rồi:
   ```bash
@@ -262,7 +268,7 @@ gradlew.bat assembleDebug
 
 Sender Linux (chưa kiểm chứng): `crates/linux-capture` chụp qua xdg-desktop-portal + PipeWire hoặc X11, mã hoá bằng FFmpeg (VA-API / NVENC / V4L2 M2M / x264) hoặc OpenH264; gói cần cài và cách chạy trong [docs/linux.md](docs/linux.md).
 
-Phát hành: tăng `version` trong `Cargo.toml`, push tag `v<version>`; workflow `release.yml` tự build installer, zip portable, APK, `.dmg` macOS và tạo GitHub Release.
+Phát hành: tăng `version` trong `Cargo.toml` (APK cũng lấy số này), push tag `v<version>`; workflow `release.yml` tự build installer, zip + exe portable, APK, `.dmg` macOS và tạo GitHub Release. APK được ký bằng keystore trong secrets của repo để TV cập nhật đè được: xem [docs/play-store.md](docs/play-store.md#ký-apk-trên-github-để-tv-tự-cập-nhật).
 
 ## Cấu trúc mã nguồn
 

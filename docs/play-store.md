@@ -26,14 +26,30 @@ keyPassword=...
 
 Không có cấu hình nào, `release` được ký bằng khoá debug để build thử (**Play Console sẽ từ chối** file đó, hoặc không nên dùng).
 
+### Ký APK trên GitHub (để TV tự cập nhật)
+
+APK trên GitHub Releases tự cập nhật trên TV (`Updater.kt`). Android chỉ cho cài đè khi **mọi bản đều ký cùng một khoá**, nên `release.yml` lấy keystore từ secrets của repo (Settings › Secrets and variables › Actions):
+
+| Secret | Giá trị |
+|---|---|
+| `ANDROID_KEYSTORE_BASE64` | file `.jks` mã hoá base64: `base64 -w0 nanocast-upload.jks` (PowerShell: `[Convert]::ToBase64String([IO.File]::ReadAllBytes("nanocast-upload.jks"))`) |
+| `ANDROID_KEYSTORE_PASSWORD` | `storePassword` |
+| `ANDROID_KEY_ALIAS` | `keyAlias` (ví dụ `nanocast`) |
+| `ANDROID_KEY_PASSWORD` | `keyPassword` |
+
+Thiếu secret, workflow vẫn chạy nhưng ký bằng khoá debug tạm của máy CI (mỗi bản một khoá): TV không tự cập nhật được, chỉ báo "cài lại app từ máy tính". TV đang chạy bản ký khoá khác (bản 0.1.0, bản build tay) cũng vậy, cài lại **một lần** bằng nút "Cài app lên TV" trên PC (nó gỡ bản cũ trước), từ đó trở đi tự cập nhật.
+
 ## 2. Build
 
 ```bash
 cd receiver-androidtv
-# tăng versionCode (mỗi lần upload phải lớn hơn) và versionName trong app/build.gradle.kts
-gradlew.bat bundleRelease      # .aab: app/build/outputs/bundle/release/app-release.aab  (~0,7 MB)
-gradlew.bat assembleRelease    # APK ký release để sideload: app/build/outputs/apk/release/app-release.apk
+# versionName = version trong Cargo.toml ([workspace.package]), versionCode = major*10000 + minor*100 + patch:
+# tăng version trong Cargo.toml là đủ (mỗi lần upload versionCode phải lớn hơn)
+gradlew.bat bundlePlay         # .aab cho Play: app/build/outputs/bundle/play/app-play.aab  (~0,7 MB)
+gradlew.bat assembleRelease    # APK ký release để sideload / GitHub: app/build/outputs/apk/release/app-release.apk
 ```
+Build type `play` = `release` nhưng **không tự cập nhật** và bỏ quyền `REQUEST_INSTALL_PACKAGES` (`src/play/AndroidManifest.xml`): Play cấm app tự cài bản mới ngoài Play. APK `release` (bản trên GitHub) thì tự cập nhật từ GitHub Releases (`Updater.kt`).
+
 `isMinifyEnabled = false`: app nhỏ, không dùng reflection tới MediaCodec nên không cần R8/ProGuard (tránh rủi ro làm hỏng lớp codec).
 
 Khuyến nghị bật **Play App Signing** (mặc định với app mới): Google giữ khoá ký cuối, bạn chỉ giữ *upload key* (keystore ở trên) và có thể reset nếu mất.
@@ -46,7 +62,7 @@ Khuyến nghị bật **Play App Signing** (mặc định với app mới): Goog
 - Activity có `intent-filter` `LEANBACK_LAUNCHER` (hiện trên launcher TV) và `LAUNCHER`.
 - `android:banner="@drawable/banner"` (320×180 dp; file `res/drawable-xhdpi/banner.png` = 640×360 px).
 - Điều khiển bằng D-pad: **OK** bật/tắt mã 4 số. Không cần chạm.
-- Quyền chỉ `INTERNET`, `ACCESS_NETWORK_STATE` (và `CHANGE_WIFI_MULTICAST_STATE` nếu thêm sau cho mDNS). Không cần quyền nhạy cảm.
+- Quyền (bản `play`) chỉ `INTERNET`, `ACCESS_NETWORK_STATE` (và `CHANGE_WIFI_MULTICAST_STATE` nếu thêm sau cho mDNS). Không cần quyền nhạy cảm.
 
 Google duyệt app TV: chạy được hoàn toàn bằng remote, không có màn hình bắt buộc cảm ứng, banner đúng kích thước, không quảng cáo đè.
 
@@ -120,7 +136,7 @@ Requires the free NANOCast sender app on your PC.
 ## 7. Checklist trước khi upload
 
 - [ ] `versionCode` tăng, `versionName` đúng.
-- [ ] `bundleRelease` ký bằng upload key thật.
+- [ ] `bundlePlay` ký bằng upload key thật.
 - [ ] Thử APK `assembleRelease` trên TV/emulator: mở app, nhận hình, bật mã 4 số.
 - [ ] Ảnh chụp 1920×1080, icon 512, banner, mô tả VI + EN, URL chính sách riêng tư.
 - [ ] Data safety + content rating đã điền.

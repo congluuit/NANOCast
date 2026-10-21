@@ -91,6 +91,25 @@ pub struct Wireless {
 }
 
 /// "192.168.1.20:37123", or just "37123" on the TV's own address.
+/// The TV's IP address as people type it: "192,168,1,50" (number pad), spaces, a scheme,
+/// a port or a path after it, leading zeros ("192.168.001.050") are all fine.
+pub fn parse_tv_ip(text: &str) -> Option<Ipv4Addr> {
+    let text = text.trim();
+    let text = text.split_once("://").map_or(text, |(_, rest)| rest);
+    let text: String = text.chars().filter(|c| !c.is_whitespace()).map(|c| if matches!(c, ',' | '，' | '。') { '.' } else { c }).collect();
+    let host = text.split(['/', ':']).next()?;
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() != 4 || parts.iter().any(|p| p.is_empty() || p.len() > 3 || !p.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    let mut octets = [0u8; 4];
+    for (o, p) in octets.iter_mut().zip(&parts) {
+        *o = p.parse().ok()?;
+    }
+    let ip = Ipv4Addr::from(octets);
+    (!ip.is_unspecified() && !ip.is_broadcast() && !ip.is_multicast()).then_some(ip)
+}
+
 pub fn parse_address(text: &str, tv: Ipv4Addr) -> Option<SocketAddr> {
     let text = text.trim();
     text.parse().ok().or_else(|| Some(SocketAddr::new(tv.into(), text.parse::<u16>().ok().filter(|&p| p != 0)?)))
@@ -272,7 +291,7 @@ fn get_apk(url: &str, cancel: &AtomicBool, progress: impl Fn(f32)) -> Result<Vec
         }
     }
     log::info!("downloading {url}");
-    let bytes = download(url, cancel, progress)?;
+    let bytes = download(url, MAX_APK, cancel, progress)?;
     if !is_apk(&bytes) {
         return Err(format!("{url}: not an APK ({} bytes)", bytes.len()));
     }
@@ -290,11 +309,13 @@ fn is_apk(bytes: &[u8]) -> bool {
     bytes.len() > 1024 && bytes.starts_with(b"PK\x03\x04")
 }
 
-fn download(url: &str, cancel: &AtomicBool, progress: impl Fn(f32)) -> Result<Vec<u8>, String> {
+/// GET `url` (at most `max` bytes), with progress 0..=1 when the size is known. Also used
+/// for app updates (`update.rs`).
+pub fn download(url: &str, max: u64, cancel: &AtomicBool, progress: impl Fn(f32)) -> Result<Vec<u8>, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_connect(Some(Duration::from_secs(10))).timeout_recv_body(Some(Duration::from_secs(60))).build().into();
     let resp = agent.get(url).call().map_err(|e| format!("{url}: {e}"))?;
     let total = resp.headers().get("content-length").and_then(|v| v.to_str().ok()?.parse::<u64>().ok()).filter(|&n| n > 0);
-    let mut reader = resp.into_body().into_reader().take(MAX_APK);
+    let mut reader = resp.into_body().into_reader().take(max);
     let mut out = Vec::with_capacity(total.unwrap_or(4 << 20) as usize);
     let mut buf = vec![0u8; 64 * 1024];
     loop {
@@ -309,6 +330,9 @@ fn download(url: &str, cancel: &AtomicBool, progress: impl Fn(f32)) -> Result<Ve
         if let Some(t) = total {
             progress((out.len() as f32 / t as f32).min(1.0));
         }
+    }
+    if total.is_some_and(|t| t != out.len() as u64) {
+        return Err(format!("{url}: got {} of {} bytes", out.len(), total.unwrap_or_default()));
     }
     Ok(out)
 }
@@ -328,6 +352,17 @@ mod tests {
     #[test]
     fn steps_in_order() {
         assert!(Step::ALL.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn typed_tv_ip() {
+        let ip = Some(Ipv4Addr::new(192, 168, 1, 50));
+        for typed in ["192.168.1.50", " 192.168.1.50 ", "192,168,1,50", "192.168.1.50:5555", "http://192.168.1.50/", "192.168.001.050", "192. 168. 1. 50"] {
+            assert_eq!(parse_tv_ip(typed), ip, "{typed}");
+        }
+        for typed in ["", "192.168.1", "192.168.1.256", "192.168.1.50.7", "tv.local", "0.0.0.0", "255.255.255.255", "1234.1.1.1"] {
+            assert_eq!(parse_tv_ip(typed), None, "{typed}");
+        }
     }
 
     #[test]

@@ -21,6 +21,8 @@ mod tray;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod tv_install;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+mod update;
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod widgets;
 
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]

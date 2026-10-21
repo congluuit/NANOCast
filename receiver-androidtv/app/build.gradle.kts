@@ -17,6 +17,18 @@ fun signingValue(prop: String, env: String): String? =
 
 val releaseStoreFile = signingValue("storeFile", "NANOCAST_KEYSTORE")
 
+// The version is [workspace.package] version in ../Cargo.toml, like the PC app and the release
+// tag (v0.2.0 <-> 0.2.0): the APK on a release is always that version. versionCode = major*10000
+// + minor*100 + patch, so every release is higher than the one before (needed to update over it).
+// `-Pnanocast.version=0.0.9` builds an older one, to try updating (Updater.kt).
+val appVersion: String = providers.gradleProperty("nanocast.version").orNull
+    ?: rootProject.file("../Cargo.toml").readLines()
+        .firstNotNullOfOrNull { Regex("""^\s*version\s*=\s*"([^"]+)"""").find(it)?.groupValues?.get(1) }
+    ?: error("no version in ../Cargo.toml")
+val appVersionCode: Int = appVersion.substringBefore('-').split('.').map { it.toInt() }
+    .also { parts -> require(parts.size == 3 && parts.all { it in 0..99 }) { "version $appVersion is not x.y.z below 100" } }
+    .let { (major, minor, patch) -> major * 10000 + minor * 100 + patch }
+
 android {
     namespace = "com.redharegames.nanocast.receiver"
     compileSdk = 35
@@ -25,8 +37,14 @@ android {
         applicationId = "com.redharegames.nanocast.receiver"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = appVersionCode
+        versionName = appVersion
+        // Updater.kt: GitHub release APKs update themselves; debug builds and Play do not.
+        buildConfigField("boolean", "SELF_UPDATE", "false")
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     signingConfigs {
@@ -46,6 +64,14 @@ android {
             isMinifyEnabled = false
             isShrinkResources = false
             signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            buildConfigField("boolean", "SELF_UPDATE", "true")
+        }
+        // Google Play (`bundlePlay`): the store updates the app, so no self-update and no
+        // REQUEST_INSTALL_PACKAGES (removed by src/play/AndroidManifest.xml).
+        create("play") {
+            initWith(getByName("release"))
+            matchingFallbacks += "release"
+            buildConfigField("boolean", "SELF_UPDATE", "false")
         }
     }
 
