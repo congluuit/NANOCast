@@ -19,14 +19,14 @@ Phần lớn độ trễ "không giải thích được" nằm ở xử lý hìn
 
 Mẹo nhanh: nếu không thấy menu Game, đổi **tên input HDMI** thành "PC" hoặc "Game console" — nhiều TV tự bật chế độ trễ thấp.
 
-## 2. Bật Developer options và Network debugging (để cài bằng adb)
+## 2. Bật Developer options và Network debugging (để cài qua mạng)
 
-Chỉ cần nếu cài bằng `adb`. Cách không cần PC: xem mục 3B.
+Cần cho mục 3A (nút *Cài app lên TV* trong app máy tính) và 3B (`adb`). Cách không cần PC: xem mục 3C.
 
 **Android TV / Google TV (Sony, TCL, Xiaomi, Philips, Nvidia Shield...):**
 1. Settings → *System* (hoặc *Device Preferences*) → **About** → bấm **Build** (hoặc *Android TV OS build*) **7 lần** cho đến khi hiện "You are now a developer".
 2. Quay lại → **Developer options** (trong System / Device Preferences).
-3. Bật **USB debugging**. Nếu có **Network debugging** (Wireless debugging) thì bật luôn — Android TV 11+ còn có *Wireless debugging* kèm cặp mã (pairing code).
+3. Bật **USB debugging**. Nếu có **Network debugging** thì bật luôn. TV Android 11+ có thể bật **Wireless debugging** (Gỡ lỗi không dây) thay vào: lần đầu phải ghép nối bằng mã 6 số (mục 3A làm được việc này).
 4. Xem IP của TV: Settings → Network & Internet → tên mạng đang kết nối (hoặc overlay của app NANOCast hiện IP).
 
 **Fire TV:** Settings → My Fire TV → About → bấm tên thiết bị 7 lần → Developer Options → bật **ADB debugging** và **Apps from Unknown Sources**.
@@ -35,7 +35,20 @@ Chỉ cần nếu cài bằng `adb`. Cách không cần PC: xem mục 3B.
 
 ## 3. Cài app NANOCast lên TV / box Android
 
-### A. Bằng `adb` (cần PC cùng mạng)
+### A. Từ app NANOCast trên máy tính, qua Wi-Fi (khuyên dùng)
+1. Trên TV bật **Gỡ lỗi USB** (mục 2), hoặc **Gỡ lỗi không dây** trên TV Android 11+. Máy tính và TV cùng mạng.
+2. Mở `nanocast.exe`: TV có Chromecast hiện thành thẻ *Không cần cài, hơi trễ* với nút **Cài app lên TV** → **Bắt đầu cài**.
+3. TV hỏi *Cho phép gỡ lỗi?* → tick **Luôn cho phép từ máy tính này** → **Cho phép** (trong 90 giây). TV nào hỏi Play Protect thì chọn *Vẫn cài đặt*.
+   - TV chỉ bật *Gỡ lỗi không dây* (Android 11+): hộp thoại báo **Ghép nối TV bằng mã** và hiện ô nhập mã. Trên TV vào *Tuỳ chọn cho nhà phát triển → Gỡ lỗi không dây → Ghép nối thiết bị bằng mã ghép nối*, để bảng đó mở, gõ mã 6 số vào ô rồi bấm **Ghép nối và cài**. App tự tìm cổng ghép nối và cổng gỡ lỗi của TV qua mDNS (`_adb-tls-pairing._tcp`, `_adb-tls-connect._tcp`); không tìm thấy thì mở *Nhập địa chỉ thủ công* và gõ "Địa chỉ IP và cổng" TV hiện (trong bảng ghép nối, và ở màn hình Gỡ lỗi không dây). Ghép nối một lần là đủ: lần sau TV nhận ra máy tính, không hỏi mã nữa (TV liệt kê máy là `nanocast@<tên máy>` trong *Thiết bị đã ghép nối*).
+4. App tự làm tiếp: tải APK đúng phiên bản (lưu cache cho TV sau), cài, mở app NANOCast trên TV, rồi **tắt gỡ lỗi** (`adb_enabled = 0`) cho an toàn. Vài giây sau TV hiện lại với nhãn *Nhanh nhất*.
+
+Ghi chú:
+- Thử ADB qua cổng **5555** trước (kiểu cũ, có trên Android TV / Google TV / Fire TV / box Android), rồi tới cổng *Wireless debugging* TV quảng bá qua mDNS. Với *Wireless debugging*, app tự ghép nối (SPAKE2 trong TLS 1.3, như `adb pair`) rồi nói ADB trong TLS với chứng chỉ làm từ chính khoá RSA dưới đây — không cần `adb.exe`. Mã sai / hết hạn → app báo *Mã ghép nối không đúng*, mở lại bảng ghép nối trên TV và nhập mã mới. Cuối cùng app tắt cả *Gỡ lỗi không dây* (`adb_wifi_enabled = 0`).
+- Khoá RSA của máy tính nằm ở `%APPDATA%\NANOCast\adbkey.pem` (TV nhớ khoá này khi chọn *Luôn cho phép*). APK tải về nằm ở `%LOCALAPPDATA%\NANOCast\` (Windows); muốn dùng file APK riêng thì đặt biến môi trường `NANOCAST_APK=<đường dẫn>` hoặc để file `NANOCast-Receiver-<version>-androidtv.apk` cạnh `nanocast.exe`.
+- TV đã có bản NANOCast khác chữ ký (ví dụ bản Play Store) thì app gỡ bản đó rồi cài bản này.
+- Lần sau muốn cài lại / cập nhật: bật lại *Gỡ lỗi USB* hoặc *Gỡ lỗi không dây* (Developer options vẫn còn, không phải bấm 7 lần nữa; TV đã ghép nối thì không hỏi mã lại).
+
+### B. Bằng `adb` (cần PC cùng mạng)
 ```bash
 adb connect <ip-tv>:5555            # Android 11+ wireless debugging: adb pair <ip>:<port> rồi adb connect <ip>:<port>
 adb install -r nanocast-receiver.apk
@@ -43,7 +56,7 @@ adb shell am start -n com.redharegames.nanocast.receiver/.MainActivity
 ```
 TV hiện hộp thoại "Allow USB debugging?" lần đầu → chọn *Always allow*.
 
-### B. Không cần PC (tải APK ngay trên TV)
+### C. Không cần PC (tải APK ngay trên TV)
 1. Bật cài app ngoài Store: Settings → Apps (Security & restrictions) → **Install unknown apps** → cho phép trình duyệt hoặc **Downloader**. Fire TV: Developer Options → *Apps from Unknown Sources*.
 2. Cài app **Downloader** (by AFTVnews) từ Google Play / Amazon Appstore trên TV.
 3. Mở Downloader → ô URL → nhập đường dẫn tải APK (ví dụ link Releases của dự án trên GitHub, hoặc link rút gọn bạn tạo) → *Go* → *Install*.

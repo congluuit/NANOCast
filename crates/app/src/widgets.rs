@@ -434,13 +434,23 @@ pub struct TvCard<'a> {
     pub status: &'a str,
     pub locked: bool,
     pub chromecast: bool,
+    /// A small button inside the card ("Install app on TV"), with its tooltip.
+    pub action: Option<(&'a str, &'a str)>,
 }
 
-pub fn tv_card(ui: &mut Ui, card: &TvCard) -> Response {
+/// The card's response, and whether its inner `action` button was clicked instead.
+pub fn tv_card(ui: &mut Ui, card: &TvCard) -> (Response, bool) {
     let p = pal(ui);
     let size = vec2(ui.available_width(), 76.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let hovered = resp.hovered();
+    // Added after the card, so it wins the hover / click where they overlap.
+    let action = card.action.map(|(label, tip)| {
+        let galley = ui.painter().layout_no_wrap(label.to_string(), bold(13.0), p.accent);
+        let pill = Rect::from_min_size(pos2(rect.right() - 44.0 - galley.size().x - 34.0, rect.center().y - 15.0), vec2(galley.size().x + 34.0, 30.0));
+        let r = ui.interact(pill, resp.id.with("action"), Sense::click()).on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand);
+        (galley, pill, r)
+    });
+    let hovered = resp.hovered() && !action.as_ref().is_some_and(|a| a.2.hovered());
     let painter = ui.painter();
     painter.rect(
         rect,
@@ -454,7 +464,8 @@ pub fn tv_card(ui: &mut Ui, card: &TvCard) -> Response {
     painter.circle_filled(ic.center(), 24.0, soft);
     draw_icon(painter, ic.shrink(12.0), if card.chromecast { Icon::Cast } else { Icon::Tv }, tone);
     let x = rect.left() + 78.0;
-    let text_w = rect.right() - 40.0 - x;
+    let right = action.as_ref().map_or(rect.right() - 40.0, |a| a.1.left() - 8.0);
+    let text_w = right - x;
     let name = painter.layout_no_wrap(card.name.to_string(), bold(18.0), p.text);
     let name_clip = Rect::from_min_size(pos2(x, rect.top() + 12.0), vec2(text_w, name.size().y));
     painter.with_clip_rect(name_clip).galley(name_clip.min, name, p.text);
@@ -470,15 +481,23 @@ pub fn tv_card(ui: &mut Ui, card: &TvCard) -> Response {
         bx += 20.0;
     }
     let status = painter.layout_no_wrap(card.status.to_string(), regular(14.0), p.weak);
-    let srect = Rect::from_min_max(pos2(bx, by + 2.0), pos2(rect.right() - 40.0, by + 24.0));
+    let srect = Rect::from_min_max(pos2(bx, by + 2.0), pos2(right.max(bx), by + 24.0));
     painter.with_clip_rect(srect).galley(srect.min, status, p.weak);
+    let mut clicked = false;
+    if let Some((galley, pill, r)) = action {
+        let on = r.hovered();
+        painter.rect(pill, 15.0, if on { p.accent_soft } else { p.card }, Stroke::new(1.0, if on { p.accent } else { p.border }), StrokeKind::Inside);
+        draw_icon(painter, Rect::from_center_size(pos2(pill.left() + 16.0, pill.center().y), Vec2::splat(15.0)), Icon::Download, p.accent);
+        painter.galley(pos2(pill.left() + 28.0, pill.center().y - galley.size().y / 2.0), galley, p.accent);
+        clicked = r.clicked();
+    }
     draw_icon(
         painter,
         Rect::from_center_size(pos2(rect.right() - 22.0, rect.center().y), Vec2::splat(20.0)),
         Icon::Chevron,
         if hovered { p.accent } else { p.weak },
     );
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    (resp.on_hover_cursor(egui::CursorIcon::PointingHand), clicked)
 }
 
 /// A slim clickable row ("My TV is not listed?").

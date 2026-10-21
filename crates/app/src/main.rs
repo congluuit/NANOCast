@@ -5,6 +5,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+mod adb;
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+mod adb_wifi;
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod chromecast;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod config;
@@ -14,6 +18,8 @@ mod gui;
 mod i18n;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod tray;
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+mod tv_install;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 mod widgets;
 

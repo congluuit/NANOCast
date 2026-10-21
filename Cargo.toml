@@ -35,3 +35,7 @@ lto = "thin"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# RSA key generation for ADB (installing the TV app) is very slow unoptimised.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3

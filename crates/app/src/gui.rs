@@ -37,6 +37,7 @@ use crate::config::ConvertPref;
 use crate::config::{Config, LastTv, Quality};
 use crate::i18n::{fill, Lang, Tr};
 use crate::tray::{self, LiveSlot, Tray};
+use crate::tv_install::{self, Problem, Step};
 use crate::widgets::{self as w, Icon, Kind, Tone};
 
 const ICON_PNG: &[u8] = include_bytes!("../../../assets/generated/icon-64.png");
@@ -210,6 +211,16 @@ struct PinDialog {
     wrong: bool,
 }
 
+/// "Install the app on this TV" for a Chromecast TV; `job` once started. The text fields
+/// are for Android 11+ Wireless debugging (pairing code, addresses when mDNS fails).
+struct InstallDialog {
+    tv: gcast::CastDevice,
+    job: Option<tv_install::Job>,
+    code: String,
+    pair_at: String,
+    connect_at: String,
+}
+
 /// A message on step 1 / 2: what happened and what to do; technical text under Details.
 struct Notice {
     tone: Tone,
@@ -255,6 +266,7 @@ struct NanoApp {
     /// Codes the TVs accepted (or the user typed) this session, by TV key.
     pins: HashMap<String, String>,
     pin_dialog: Option<PinDialog>,
+    install: Option<InstallDialog>,
     /// "Cast again when the app opens": waiting for the last TV until then.
     recast_until: Option<Instant>,
     /// macOS: Screen Recording permission (always true elsewhere).
@@ -320,6 +332,7 @@ impl NanoApp {
             config,
             pins: HashMap::new(),
             pin_dialog: None,
+            install: None,
             recast_until: None,
             can_capture: screen_permission(),
             cast: None,
@@ -899,6 +912,7 @@ impl NanoApp {
         } else {
             let last = self.config.last_tv.as_ref();
             let mut chosen = None;
+            let mut install = None;
             for tv in &tvs {
                 let (badge, tone, status, locked) = match tv {
                     Tv::Nano { info, manual } => {
@@ -924,8 +938,14 @@ impl NanoApp {
                     status: &status,
                     locked,
                     chromecast: matches!(tv, Tv::Google(_)),
+                    action: matches!(tv, Tv::Google(_)).then_some((t.inst_button, t.inst_button_tip)),
                 };
-                if w::tv_card(ui, &card).clicked() {
+                let (card, action) = w::tv_card(ui, &card);
+                if action {
+                    if let Tv::Google(d) = tv {
+                        install = Some(d.clone());
+                    }
+                } else if card.clicked() {
                     chosen = Some(tv.clone());
                 }
             }
@@ -935,6 +955,9 @@ impl NanoApp {
             });
             if let Some(tv) = chosen {
                 self.choose_tv(tv);
+            }
+            if let Some(tv) = install {
+                self.install = Some(InstallDialog { tv, job: None, code: String::new(), pair_at: String::new(), connect_at: String::new() });
             }
         }
         if self.browser_error.is_some() {
@@ -1449,6 +1472,100 @@ impl NanoApp {
             self.pin_dialog = None;
         }
     }
+
+    /// Install the receiver on a Chromecast TV over ADB: what to turn on first, then the
+    /// steps as they happen, then done / what went wrong.
+    fn ui_install_dialog(&mut self, ctx: &egui::Context) {
+        let t = self.t();
+        let Some(dialog) = self.install.as_mut() else {
+            return;
+        };
+        let state = dialog.job.as_ref().map(|j| j.state());
+        let mut start = false;
+        let mut close = false;
+        // Asking for the pairing code: the next start pairs first.
+        let mut pair = false;
+        let modal = egui::Modal::new(egui::Id::unique("install-dialog")).show(ctx, |ui| {
+            let p = w::pal(ui);
+            ui.set_width(420.0);
+            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.horizontal(|ui| {
+                w::icon(ui, Icon::Download, 26.0, p.accent);
+                ui.label(RichText::new(t.inst_title).font(w::bold(22.0)));
+            });
+            let Some(state) = &state else {
+                ui.add(egui::Label::new(fill(t.inst_intro, &[&dialog.tv.name])).wrap());
+                ui_how_to_enable(ui, t);
+                ui.add(egui::Label::new(RichText::new(t.inst_note).small().color(p.weak)).wrap());
+                ui.horizontal(|ui| {
+                    start = w::big_button(ui, Icon::Download, t.inst_start, None, Kind::Primary, vec2(200.0, 44.0), true).clicked();
+                    close = w::big_button(ui, Icon::Back, t.cancel, None, Kind::Normal, vec2(150.0, 44.0), true).clicked();
+                });
+                return;
+            };
+            let failed = state.result.as_ref().and_then(|r| r.as_ref().err());
+            for step in Step::ALL {
+                ui_install_step(ui, t, step, state, failed.map(|f| f.step));
+            }
+            match &state.result {
+                None => {
+                    if state.step == Step::Allow {
+                        w::banner(ui, Tone::Accent, Icon::Tv, t.inst_look_tv, &[]);
+                    } else if state.step == Step::Install {
+                        ui.add(egui::Label::new(RichText::new(t.inst_protect).small().color(p.weak)).wrap());
+                    }
+                    close = w::big_button(ui, Icon::Back, t.cancel, None, Kind::Normal, vec2(150.0, 44.0), true).clicked();
+                }
+                Some(Ok(adb_off)) => {
+                    let mut lines = vec![t.inst_done];
+                    if !adb_off {
+                        lines.push(t.inst_adb_on);
+                    }
+                    w::banner(ui, Tone::Good, Icon::Check, t.inst_done_title, &lines);
+                    close = w::big_button(ui, Icon::Check, t.inst_finish, None, Kind::Primary, vec2(150.0, 44.0), true).clicked();
+                }
+                Some(Err(f)) => {
+                    let (title, lines) = install_problem(f.problem, t);
+                    let tone = if f.problem == Problem::NeedsPairing { Tone::Accent } else { Tone::Bad };
+                    w::banner(ui, tone, if tone == Tone::Bad { Icon::Warn } else { Icon::Lock }, title, &lines);
+                    pair = matches!(f.problem, Problem::NeedsPairing | Problem::WrongCode | Problem::NoPairPort);
+                    let mut ready = true;
+                    if f.problem == Problem::NoAdb {
+                        ui_how_to_enable(ui, t);
+                    } else if pair {
+                        ready = ui_pairing(ui, t, dialog, f.problem == Problem::NoPairPort);
+                    } else if f.problem == Problem::NoConnectPort {
+                        ready = ui_address(ui, t, t.inst_connect_at, &mut dialog.connect_at, dialog.tv.addr) && !dialog.connect_at.trim().is_empty();
+                    }
+                    egui::CollapsingHeader::new(RichText::new(t.details).small()).id_salt("install-detail").show(ui, |ui| {
+                        ui.add(egui::Label::new(RichText::new(&f.detail).monospace()).wrap());
+                    });
+                    ui.horizontal(|ui| {
+                        let (icon, label) = if pair { (Icon::Lock, t.inst_pair_start) } else { (Icon::Refresh, t.inst_retry) };
+                        start = w::big_button(ui, icon, label, None, Kind::Primary, vec2(190.0, 44.0), ready).clicked();
+                        close = w::big_button(ui, Icon::Back, t.inst_close, None, Kind::Normal, vec2(150.0, 44.0), true).clicked();
+                    });
+                }
+            }
+        });
+        // Clicking outside / Esc closes only while nothing is running.
+        if modal.should_close() && !dialog.job.as_ref().is_some_and(|j| j.running()) {
+            close = true;
+        }
+        if start {
+            let addr = dialog.tv.addr;
+            let host = format!("nanocast@{}", sender_name().split_whitespace().collect::<Vec<_>>().join("-"));
+            let wireless = tv_install::Wireless {
+                code: pair.then(|| dialog.code.clone()),
+                pair_at: tv_install::parse_address(&dialog.pair_at, addr).filter(|_| pair),
+                connect_at: tv_install::parse_address(&dialog.connect_at, addr),
+            };
+            dialog.job = Some(tv_install::Job::start(addr, apk_url(), host, wireless));
+        } else if close {
+            // Dropping a running job cancels it.
+            self.install = None;
+        }
+    }
 }
 
 impl eframe::App for NanoApp {
@@ -1475,13 +1592,21 @@ impl eframe::App for NanoApp {
             });
         });
         self.ui_pin_dialog(&ctx);
+        self.ui_install_dialog(&ctx);
         self.handle_close(&ctx);
         if self.config != self.saved {
             self.config.save();
             self.saved = self.config.clone();
         }
         // Live status while casting (countdowns), a fresh TV list otherwise.
-        ctx.request_repaint_after(Duration::from_millis(if self.casting() { 250 } else { 500 }));
+        let installing = self.install.as_ref().is_some_and(|d| d.job.as_ref().is_some_and(|j| j.running()));
+        ctx.request_repaint_after(Duration::from_millis(if installing {
+            100
+        } else if self.casting() {
+            250
+        } else {
+            500
+        }));
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -1507,6 +1632,105 @@ fn ui_get_app(ui: &mut egui::Ui, t: &Tr, hint: bool) {
     }
     if hint {
         ui.add(egui::Label::new(RichText::new(t.get_app_hint).small().color(w::pal(ui).weak)).wrap());
+    }
+}
+
+/// The three things to turn on on the TV before installing over the network.
+fn ui_how_to_enable(ui: &mut egui::Ui, t: &Tr) {
+    egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 2)).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        for line in [t.inst_how_1, t.inst_how_2, t.inst_how_3] {
+            ui.add(egui::Label::new(line).wrap());
+        }
+    });
+}
+
+/// One row of the install steps: done / now / later / failed here.
+fn ui_install_step(ui: &mut egui::Ui, t: &Tr, step: Step, state: &tv_install::State, failed_at: Option<Step>) {
+    let p = w::pal(ui);
+    let label = match step {
+        Step::Download => t.inst_step_download,
+        Step::Connect => t.inst_step_connect,
+        Step::Allow => t.inst_step_allow,
+        Step::Install => t.inst_step_install,
+        Step::Open => t.inst_step_open,
+        Step::AdbOff => t.inst_step_adb_off,
+    };
+    let finished_ok = matches!(state.result, Some(Ok(_)));
+    // Steps before the current one are done ("Allow" too when the TV already trusts us).
+    let done = finished_ok || step < state.step || failed_at.is_some_and(|f| step < f);
+    let now = state.result.is_none() && step == state.step;
+    ui.horizontal(|ui| {
+        if failed_at == Some(step) {
+            w::icon(ui, Icon::Warn, 20.0, p.red);
+        } else if done {
+            w::icon(ui, Icon::Check, 20.0, p.green);
+        } else if now {
+            ui.add_sized(vec2(20.0, 20.0), egui::Spinner::new());
+        } else {
+            let (rect, _) = ui.allocate_exact_size(vec2(20.0, 20.0), egui::Sense::hover());
+            ui.painter().circle_stroke(rect.center(), 5.0, egui::Stroke::new(1.5, p.border));
+        }
+        let color = if done || now || failed_at == Some(step) { p.text } else { p.weak };
+        ui.label(RichText::new(label).font(if now { w::bold(16.0) } else { w::regular(16.0) }).color(color));
+        if now {
+            if let Some(f) = state.fraction {
+                ui.add(egui::ProgressBar::new(f).desired_width(110.0).show_percentage());
+            }
+        }
+    });
+}
+
+/// The pairing code (and, folded away unless the pairing dialog was not found, the
+/// addresses the TV shows). True when it can be sent.
+fn ui_pairing(ui: &mut egui::Ui, t: &Tr, dialog: &mut InstallDialog, show_addresses: bool) -> bool {
+    let p = w::pal(ui);
+    ui.label(RichText::new(t.inst_code).strong());
+    let r = ui.add(
+        egui::TextEdit::singleline(&mut dialog.code)
+            .hint_text(RichText::new("000000").font(w::bold(32.0)).color(p.border))
+            .char_limit(6)
+            .desired_width(190.0)
+            .align(egui::Align2::CENTER_CENTER)
+            .margin(vec2(12.0, 8.0))
+            .font(w::bold(32.0)),
+    );
+    dialog.code.retain(|c| c.is_ascii_digit());
+    if !r.has_focus() && dialog.code.is_empty() {
+        r.request_focus();
+    }
+    let mut ok = dialog.code.len() == 6;
+    egui::CollapsingHeader::new(RichText::new(t.inst_manual).small()).id_salt("install-addresses").default_open(show_addresses).show(ui, |ui| {
+        ok &= ui_address(ui, t, t.inst_pair_at, &mut dialog.pair_at, dialog.tv.addr);
+        ok &= ui_address(ui, t, t.inst_connect_at, &mut dialog.connect_at, dialog.tv.addr);
+    });
+    ok
+}
+
+/// One "IP address & port" field; false when it holds something that is not one.
+fn ui_address(ui: &mut egui::Ui, t: &Tr, label: &str, text: &mut String, tv: std::net::Ipv4Addr) -> bool {
+    let valid = text.trim().is_empty() || tv_install::parse_address(text, tv).is_some();
+    ui.label(RichText::new(label).small());
+    let mut edit = egui::TextEdit::singleline(text).hint_text(t.inst_addr_hint).desired_width(240.0);
+    if !valid {
+        edit = edit.text_color(w::pal(ui).red);
+    }
+    ui.add(edit);
+    valid
+}
+
+/// Title and what to do for a failed install.
+fn install_problem(problem: Problem, t: &Tr) -> (&'static str, Vec<&'static str>) {
+    match problem {
+        Problem::NoInternet => (t.inst_err_net, vec![t.inst_err_net_1]),
+        Problem::NoAdb => (t.inst_err_adb, vec![t.inst_err_adb_1]),
+        Problem::NotAllowed => (t.inst_err_allow, vec![t.inst_err_allow_1]),
+        Problem::NeedsPairing => (t.inst_err_pair, vec![t.inst_err_pair_1]),
+        Problem::WrongCode => (t.inst_err_code, vec![t.inst_err_code_1]),
+        Problem::NoPairPort => (t.inst_err_pair_port, vec![t.inst_err_pair_port_1]),
+        Problem::NoConnectPort => (t.inst_err_conn_port, vec![t.inst_err_conn_port_1]),
+        Problem::LowSpace => (t.inst_err_space, vec![t.inst_err_space_1]),
+        Problem::Failed => (t.inst_err_other, vec![t.inst_err_other_1]),
     }
 }
 

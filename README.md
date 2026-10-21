@@ -130,6 +130,7 @@ Tự đóng gói `.dmg` trên Mac (cần `xcode-select --install` và [rustup](h
 
 TV / box Android (Android TV, Google TV, Fire TV, box Android bất kỳ):
 
+- **Từ app trên máy tính, qua Wi-Fi (không cần USB)**: TV có Chromecast hiện trong danh sách với nút **Cài app lên TV**. Trên TV bật *Tuỳ chọn cho nhà phát triển* (Cài đặt → Giới thiệu → bấm *Bản dựng* 7 lần) rồi bật **Gỡ lỗi USB**; bấm *Bắt đầu cài*, trên TV chọn **Cho phép**. App tự tải đúng APK của phiên bản, cài, mở app trên TV rồi **tắt gỡ lỗi** lại. TV Android 11+ chỉ bật *Gỡ lỗi không dây* thì app hỏi mã ghép nối 6 số (Tuỳ chọn cho nhà phát triển → Gỡ lỗi không dây → *Ghép nối thiết bị bằng mã ghép nối*) rồi cài tiếp như trên.
 - **Không cần máy tính**: trên TV cài app *Downloader* (hoặc trình duyệt), tải file `NANOCast-Receiver-<version>-androidtv.apk` từ [Releases](https://github.com/congluuit/NANOCast/releases/latest), mở file để cài (bật *Cho phép nguồn không xác định* khi TV hỏi). Hoặc chép APK vào USB, mở bằng trình quản lý file trên TV.
 - **Bằng adb từ máy tính**: bật *Developer options → Network debugging* trên TV, rồi:
   ```bash
@@ -267,7 +268,7 @@ Phát hành: tăng `version` trong `Cargo.toml`, push tag `v<version>`; workflow
 
 | Thư mục | Nội dung |
 |---|---|
-| `crates/app` | `nanocast.exe`: GUI egui 3 bước, Chromecast, khay hệ thống, chuỗi VI/EN |
+| `crates/app` | `nanocast.exe`: GUI egui 3 bước, Chromecast, khay hệ thống, chuỗi VI/EN, cài app lên TV qua ADB Wi-Fi (`adb.rs`, `tv_install.rs`) |
 | `crates/core` | Giao thức, discovery mDNS, kênh control, bitrate thích nghi, Opus |
 | `crates/win-capture` | `nanocast-win`: capture WGC → NV12 trên GPU → Media Foundation H.264/HEVC → UDP, âm thanh WASAPI |
 | `crates/mac-capture` | `nanocast-mac`: ScreenCaptureKit → VideoToolbox, cùng API (chưa kiểm chứng) |
